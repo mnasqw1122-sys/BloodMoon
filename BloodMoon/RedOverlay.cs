@@ -8,13 +8,15 @@ namespace BloodMoon
         private Image? _img;
         private Color _target = new Color(1f, 0.12f, 0.12f, 0.18f);
         private float _fadeSpeed = 2.0f;
+        private HUDManager? _cachedHud;
 
         public void Show()
         {
             if (_img == null)
             {
-                var hud = Object.FindObjectOfType<HUDManager>();
-                if (hud == null) return;
+                if (_cachedHud == null) _cachedHud = Object.FindObjectOfType<HUDManager>();
+                if (_cachedHud == null) return;
+                var hud = _cachedHud;
                 var exist = hud.transform.Find("BloodMoonOverlay");
                 GameObject go;
                 if (exist != null)

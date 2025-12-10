@@ -30,6 +30,8 @@ namespace BloodMoon
             _title.rectTransform.anchoredPosition = tod.stormTitleText.rectTransform.anchoredPosition + new Vector2(0, -75);
         }
 
+        private string _lastTimeStr = string.Empty;
+
         public void Refresh(TimeSpan now)
         {
             if (_title == null) return;
@@ -38,7 +40,13 @@ namespace BloodMoon
             var remain = active ? _event.GetOverETA(now) : eta;
             var label = active ? "血月持续时间" : "血月来临时间";
             var timeStr = $"{Mathf.FloorToInt((float)remain.TotalHours):000}:{remain.Minutes:00}";
-            _title.text = $"{label} {timeStr}";
+            
+            var fullStr = $"{label} {timeStr}";
+            if (fullStr != _lastTimeStr)
+            {
+                _title.text = fullStr;
+                _lastTimeStr = fullStr;
+            }
         }
 
         public void Dispose()

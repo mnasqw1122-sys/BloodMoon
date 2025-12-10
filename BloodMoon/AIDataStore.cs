@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -43,7 +44,6 @@ namespace BloodMoon
         {
             public List<Vector3> playerAmbushSpots = new List<Vector3>();
             public List<Vector3> stuckSpots = new List<Vector3>();
-            public List<DangerEvent> dangerEvents = new List<DangerEvent>();
             public Vector3 lastKnownPlayerPos;
             public float lastSeenTime;
             public int reloadCount;
@@ -55,7 +55,6 @@ namespace BloodMoon
             {
                 playerAmbushSpots = s.PlayerAmbushSpots;
                 stuckSpots = s.StuckSpots;
-                dangerEvents = s.DangerEvents;
                 lastKnownPlayerPos = s.LastKnownPlayerPos;
                 lastSeenTime = s.LastSeenTime;
                 reloadCount = s._reloadCount;
@@ -68,7 +67,6 @@ namespace BloodMoon
             {
                 if (playerAmbushSpots != null) s.PlayerAmbushSpots = playerAmbushSpots;
                 if (stuckSpots != null) s.StuckSpots = stuckSpots;
-                if (dangerEvents != null) s.DangerEvents = dangerEvents;
                 s.LastKnownPlayerPos = lastKnownPlayerPos;
                 s.LastSeenTime = lastSeenTime;
                 s._reloadCount = reloadCount;
@@ -171,16 +169,23 @@ namespace BloodMoon
 
         public void RecordPlayerSpeed(float v)
         {
-            _playerSpeedSamples.Add(v);
-            if (_playerSpeedSamples.Count > 1000) _playerSpeedSamples.RemoveAt(0);
+            if (v > 0.05f && v < 15f)
+            {
+                _playerSpeedSamples.Add(v);
+                if (_playerSpeedSamples.Count > 1000) _playerSpeedSamples.RemoveAt(0);
+            }
         }
 
         public float GetAverageSpeed()
         {
             if (_playerSpeedSamples.Count == 0) return 3f;
+            var valid = _playerSpeedSamples.Where(x => x > 0.05f && x < 15f).ToArray();
+            if (valid.Length == 0) return 3f;
             float s = 0f;
-            for (int i = 0; i < _playerSpeedSamples.Count; i++) s += _playerSpeedSamples[i];
-            return s / _playerSpeedSamples.Count;
+            for (int i = 0; i < valid.Length; i++) s += valid[i];
+            float avg = s / valid.Length;
+            if (avg < 0.5f) return 3f;
+            return avg;
         }
 
         public void MarkDanger(Vector3 pos)
@@ -296,6 +301,10 @@ namespace BloodMoon
                     string json = File.ReadAllText(globalPath);
                     var globalData = JsonUtility.FromJson<GlobalSaveData>(json);
                     if (globalData != null) globalData.ToStore(this);
+                    if (_playerSpeedSamples != null)
+                    {
+                        _playerSpeedSamples = _playerSpeedSamples.Where(x => x > 0.05f && x < 15f).Take(1000).ToList();
+                    }
                 }
                 else
                 {
@@ -502,6 +511,37 @@ namespace BloodMoon
                 }
             }
             return w;
+        }
+
+        // Runtime Engagement Tracking (Not serialized)
+        private Dictionary<CharacterMainControl, List<CharacterMainControl>> _engagements = new Dictionary<CharacterMainControl, List<CharacterMainControl>>();
+
+        public void RegisterEngagement(CharacterMainControl target, CharacterMainControl attacker)
+        {
+            if (target == null || attacker == null) return;
+            if (!_engagements.ContainsKey(target)) _engagements[target] = new List<CharacterMainControl>();
+            
+            var list = _engagements[target];
+            if (!list.Contains(attacker)) list.Add(attacker);
+        }
+
+        public void UnregisterEngagement(CharacterMainControl target, CharacterMainControl attacker)
+        {
+            if (target == null || !_engagements.ContainsKey(target)) return;
+            _engagements[target].Remove(attacker);
+        }
+
+        public int GetEngagementCount(CharacterMainControl target)
+        {
+            if (target == null || !_engagements.ContainsKey(target)) return 0;
+            var list = _engagements[target];
+            // Lazy cleanup
+            for (int i = list.Count - 1; i >= 0; i--)
+            {
+                if (list[i] == null || !list[i].gameObject.activeInHierarchy || list[i].Health.CurrentHealth <= 0)
+                    list.RemoveAt(i);
+            }
+            return list.Count;
         }
     }
 }

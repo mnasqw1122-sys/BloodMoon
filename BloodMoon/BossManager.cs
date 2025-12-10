@@ -9,7 +9,7 @@ using Duckov.ItemUsage;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using System.Threading.Tasks;
-using Pathfinding;
+
 
 namespace BloodMoon
 {
@@ -18,7 +18,6 @@ namespace BloodMoon
         private readonly AIDataStore _store;
         private bool _initialized;
         private readonly HashSet<CharacterMainControl> _processed = new HashSet<CharacterMainControl>();
-        private readonly HashSet<CharacterMainControl> _minionDoubled = new HashSet<CharacterMainControl>();
         
         private int _currentScene = -1;
         private bool _sceneSetupDone;
@@ -31,7 +30,6 @@ namespace BloodMoon
         private int _minionsPerBossCap = 5;
         private int _globalMinionCap = 20;
         private int _globalMinionSpawned = 0;
-        private bool _enableMinionDoubling = false;
         private readonly List<CharacterRandomPreset> _selectedBossPresets = new List<CharacterRandomPreset>();
         private int _selectedScene = -1;
         private bool _selectionInitialized;
@@ -42,12 +40,18 @@ namespace BloodMoon
         private float _strategyDecayTimer;
         private readonly List<CharacterMainControl> _charactersCache = new List<CharacterMainControl>();
         private float _charactersRescanCooldown;
-        private readonly System.Collections.Generic.Dictionary<UnityEngine.Vector2Int, int> _crowdGridFine = new System.Collections.Generic.Dictionary<UnityEngine.Vector2Int, int>();
-        private readonly System.Collections.Generic.Dictionary<UnityEngine.Vector2Int, int> _crowdGridCoarse = new System.Collections.Generic.Dictionary<UnityEngine.Vector2Int, int>();
-        private float _crowdCellFine = 2f;
-        private float _crowdCellCoarse = 6f;
-        private float _lastCrowdUpdateTime;
-        private System.Threading.Tasks.Task? _crowdTask;
+
+        private bool _wanderersSetupDone;
+        private void DisableVanillaControllersCached()
+        {
+            for (int i = 0; i < _charactersCache.Count; i++)
+            {
+                var c = _charactersCache[i];
+                if (c == null || c.IsMainCharacter) continue;
+                var ai = c.GetComponent<AICharacterController>();
+                if (ai != null) ai.enabled = false;
+            }
+        }
 
         public BossManager(AIDataStore store)
         {
@@ -92,9 +96,11 @@ namespace BloodMoon
             }
             if (_charactersRescanCooldown <= 0f)
             {
+                // Simple optimization: only scan if we are not overloaded
                 _charactersCache.Clear();
                 _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
-                _charactersRescanCooldown = 8.0f;
+                _charactersRescanCooldown = 10.0f;
+                DisableVanillaControllersCached();
             }
             _charactersRescanCooldown -= Time.deltaTime;
             var all = _charactersCache;
@@ -134,7 +140,7 @@ namespace BloodMoon
             ProcessMinionsBudgeted(player, 6);
             DisableDefaultSpawner();
             _scanCooldown = 1.0f;
-            TriggerCrowdUpdate(all);
+            
             _strategyDecayTimer -= Time.deltaTime;
             if (_strategyDecayTimer <= 0f)
             {
@@ -177,7 +183,7 @@ namespace BloodMoon
             }
         }
 
-        private void EnhanceBoss(CharacterMainControl c)
+        private async void EnhanceBoss(CharacterMainControl c)
         {
             var item = c.CharacterItem;
             if (item == null) return;
@@ -188,7 +194,7 @@ namespace BloodMoon
             Multiply(item, "TurnSpeed", 1.35f);
             BoostDefense(item, true);
             var mw = item.GetStat("MaxWeight".GetHashCode());
-            if (mw != null) mw.BaseValue = 1000000000f;
+            if (mw != null) mw.BaseValue = 1000f;
             EquipTopArmor(c);
             EnsureTwoGuns(c);
             EquipMeleeWeaponLevel(c, 6);
@@ -201,6 +207,7 @@ namespace BloodMoon
             if (ai != null) ai.enabled = false;
             c.Health.RequestHealthBar();
             AddBossGlow(c);
+            await EnsureMedicalSupplies(c, 3);
         }
 
         private static readonly int EmissionColorId = Shader.PropertyToID("_EmissionColor");
@@ -270,6 +277,7 @@ namespace BloodMoon
                 var backpack = await ItemAssetsCollection.InstantiateAsync(bpCandidates.GetRandom());
                 c.CharacterItem.TryPlug(backpack, emptyOnly: true);
             }
+            await EquipBackpackById(c, 40);
         }
 
         private async void EquipMeleeWeaponLevel(CharacterMainControl c, int level)
@@ -351,6 +359,23 @@ namespace BloodMoon
         }
 
 
+        private async System.Threading.Tasks.Task EnsureMedicalSupplies(CharacterMainControl c, int count)
+        {
+            var tags = new List<Tag> { TagUtilities.TagFromString("Drug") };
+            var meds = ItemAssetsCollection.Search(new ItemFilter { requireTags = tags.ToArray(), minQuality = 4, maxQuality = 6 });
+            if (meds.Length > 0)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    var item = await ItemAssetsCollection.InstantiateAsync(meds.GetRandom());
+                    if (item != null)
+                    {
+                        c.CharacterItem.Inventory.AddItem(item);
+                    }
+                }
+            }
+        }
+
         private async void ProcessMinionsBudgeted(CharacterMainControl player, int budget)
         {
             if (_minionsCache.Count == 0 || budget <= 0) return;
@@ -380,6 +405,7 @@ namespace BloodMoon
                     m.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
                     var mai = m.GetComponent<AICharacterController>();
                     if (mai != null) mai.enabled = false;
+                    await EnsureMedicalSupplies(m, 2);
                     var custom = m.gameObject.GetComponent<BloodMoonAIController>();
                     if (custom == null)
                     {
@@ -394,45 +420,6 @@ namespace BloodMoon
                         GatherLeaderGroup(leader);
                     }
                     processed++;
-                }
-                if (_enableMinionDoubling && !_minionDoubled.Contains(m))
-                {
-                    var p = m.characterPreset;
-                    if (p != null)
-                    {
-                        if (_globalMinionSpawned >= _globalMinionCap) break;
-                        var scene = MultiSceneCore.MainScene.HasValue ? MultiSceneCore.MainScene.Value.buildIndex : m.gameObject.scene.buildIndex;
-                        Vector3 spawnPos = GetOpenAreaAnchorNearPlayer(player);
-                        var clone = await p.CreateCharacterAsync(spawnPos, Vector3.forward, scene, m.GetComponent<AICharacterController>()?.group, false);
-                        if (clone != null)
-                        {
-                            Multiply(clone.CharacterItem, "WalkSpeed", 1.2f);
-                            Multiply(clone.CharacterItem, "RunSpeed", 1.2f);
-                            await EquipArmorLevel(clone, 6);
-                            await FillHighAmmo(clone, 5);
-                            var mhc = clone.CharacterItem.GetStat("MaxHealth".GetHashCode());
-                            if (mhc != null) mhc.BaseValue *= 2f;
-                            EnsureGunLoaded(clone);
-                            clone.Health.SetHealth(clone.Health.MaxHealth);
-                            var mwc = clone.CharacterItem.GetStat("MaxWeight".GetHashCode());
-                            if (mwc != null) mwc.BaseValue = 1000000000f;
-                            clone.UpdateWeightState();
-                            clone.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
-                            var cai = clone.GetComponent<AICharacterController>();
-                            if (cai != null) cai.enabled = false;
-                            var customClone = clone.gameObject.AddComponent<BloodMoonAIController>();
-                            customClone.Init(clone, _store);
-                            customClone.SetChaseDelay(0f);
-                            var clLeader = clone.GetComponent<AICharacterController>()?.leader;
-                            if (clLeader != null)
-                            {
-                                GatherLeaderGroup(clLeader);
-                            }
-                            _minionDoubled.Add(m);
-                            _globalMinionSpawned++;
-                            processed++;
-                        }
-                    }
                 }
             }
             _minionCursor = (_minionCursor + processed) % Mathf.Max(1, n);
@@ -471,6 +458,7 @@ namespace BloodMoon
                 var backpack = await ItemAssetsCollection.InstantiateAsync(bpCandidates.GetRandom());
                 c.CharacterItem.TryPlug(backpack, emptyOnly: true);
             }
+            await EquipBackpackById(c, 40);
         }
 
         private async System.Threading.Tasks.Task EnsureNoPistolWeapons(CharacterMainControl c)
@@ -528,6 +516,15 @@ namespace BloodMoon
             {
                 var ammo = await ItemAssetsCollection.InstantiateAsync(ids.GetRandom());
                 c.CharacterItem.Inventory.AddItem(ammo);
+            }
+        }
+
+        private async System.Threading.Tasks.Task EquipBackpackById(CharacterMainControl c, int id)
+        {
+            var item = await ItemAssetsCollection.InstantiateAsync(id);
+            if (item != null)
+            {
+                c.CharacterItem.TryPlug(item, emptyOnly: false);
             }
         }
 
@@ -603,6 +600,7 @@ namespace BloodMoon
 
         private async UniTask EnsureWanderersForLonelyBosses()
         {
+            if (_wanderersSetupDone) return;
             if (!LevelManager.Instance || !LevelManager.Instance.IsRaidMap) return;
             var bosses = new List<(CharacterMainControl boss, AICharacterController? ai)>();
             // Optimization: Use cached characters list instead of FindObjectsOfType
@@ -673,52 +671,14 @@ namespace BloodMoon
                     if (_globalMinionSpawned >= _globalMinionCap) break;
                     var boss = b.boss;
                     var anchor = GetOrCreateAnchor(boss, CharacterMainControl.Main.transform.position);
-                    
-                    // Try to find a valid spawn position around the anchor
-                    Vector3 pos = anchor;
-                    bool foundValid = false;
-                    var ground = GameplayDataSettings.Layers.groundLayerMask;
-
-                    for (int k = 0; k < 10; k++)
-                    {
-                        var offset2D = Random.insideUnitCircle.normalized * UnityEngine.Random.Range(2f, 6f);
-                        var candidate = anchor + new Vector3(offset2D.x, 0f, offset2D.y);
-                        
-                        // 1. Snap to ground
-                        if (Physics.Raycast(candidate + Vector3.up * 2.0f, Vector3.down, out var hit, 4.0f, ground))
-                        {
-                            candidate = hit.point;
-                        }
-                        else if (Physics.Raycast(candidate + Vector3.up * 0.5f, Vector3.down, out var hit2, 2.0f, ground))
-                        {
-                            candidate = hit2.point;
-                        }
-                        else
-                        {
-                             continue; // No ground found
-                        }
-
-                        // 2. Check if open area (NavMesh + Collision)
-                        if (IsOpenArea(candidate, 1.0f))
-                        {
-                            pos = candidate;
-                            foundValid = true;
-                            break;
-                        }
-                    }
-                    
-                    if (!foundValid)
-                    {
-                        // Fallback: spawn exactly at anchor (boss position) if no space around
-                         pos = anchor;
-                    }
+                    Vector3 pos = GetSpawnPointOrFallback(anchor);
 
                     int scene = MultiSceneCore.MainScene.HasValue ? MultiSceneCore.MainScene.Value.buildIndex : boss.gameObject.scene.buildIndex;
                     var clone = await wanderer.CreateCharacterAsync(pos, Vector3.forward, scene, null, false);
                     if (clone != null)
                     {
                         var ai = clone.GetComponent<AICharacterController>();
-                        if (ai != null) ai.enabled = false;
+                        if (ai != null) { ai.enabled = false; ai.leader = b.boss; }
                         Multiply(clone.CharacterItem, "WalkSpeed", 1.2f);
                         Multiply(clone.CharacterItem, "RunSpeed", 1.2f);
                         await EquipArmorLevel(clone, 6);
@@ -731,7 +691,7 @@ namespace BloodMoon
                         EnsureGunLoaded(clone);
                         clone.Health.SetHealth(clone.Health.MaxHealth);
                         var mwc2 = clone.CharacterItem.GetStat("MaxWeight".GetHashCode());
-                        if (mwc2 != null) mwc2.BaseValue = 1000000000f;
+                        if (mwc2 != null) mwc2.BaseValue = 1000f;
                         clone.UpdateWeightState();
                         clone.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
                         var cai2 = clone.GetComponent<AICharacterController>();
@@ -746,6 +706,7 @@ namespace BloodMoon
                     }
                 }
             }
+            _wanderersSetupDone = true;
         }
 
         private void AssignWingIndicesForLeader(CharacterMainControl boss)
@@ -794,253 +755,70 @@ namespace BloodMoon
             if (_groupAnchors.TryGetValue(boss, out var pos)) return pos;
             if (!TryGetRandomMapPoint(out pos))
             {
-                pos = GetOpenAreaNear(fallbackCenter, 30f, 50f);
+                pos = GetSpawnPointOrFallback(fallbackCenter);
             }
-            if (!IsOpenArea(pos, 3f)) pos = GetOpenAreaNear(fallbackCenter, 30f, 50f);
             _groupAnchors[boss] = pos;
             return pos;
         }
 
-        private Vector3 GetOpenAreaAnchorNearPlayer(CharacterMainControl player)
+        private Vector3 GetSpawnPointOrFallback(Vector3 fallback)
         {
-            return SelectOpenAreaParallel(player.transform.position, 20, 45f, 80f, player.transform.position);
-        }
-
-        private Vector3 GetOpenAreaNear(Vector3 center, float minDist, float maxDist)
-        {
-            return SelectOpenAreaParallel(center, 24, minDist, maxDist);
-        }
-
-        private Vector3 SelectOpenAreaParallel(Vector3 center, int count, float minDist, float maxDist, Vector3? avoidVisibilityFrom = null)
-        {
-            var candidates = new Vector3[count];
-            var ground = GameplayDataSettings.Layers.groundLayerMask;
-            for (int i = 0; i < count; i++)
+            if (TryGetRandomMapPoint(out var p)) return p;
+            var result = fallback;
+            var player = CharacterMainControl.Main;
+            if (player != null)
             {
-                Vector3 pos;
-                if (!TryGetRandomMapPoint(out pos))
+                var playerPos = player.transform.position;
+                float minR = 20f;
+                float maxR = 35f;
+                float dist = Vector3.Distance(fallback, playerPos);
+                if (dist < minR + 2f)
                 {
-                    float ang = UnityEngine.Random.Range(0f, 360f) * Mathf.Deg2Rad;
-                    float r = UnityEngine.Random.Range(minDist, maxDist);
-                    // Initial guess: assume same height as player
-                    pos = center + new Vector3(Mathf.Cos(ang), 0f, Mathf.Sin(ang)) * r;
-                    
-                    // Attempt to snap to ground near this point
-                    // Cast UP from low and DOWN from high to find floor
-                    if (Physics.Raycast(pos + Vector3.up * 2.0f, Vector3.down, out var hit, 4.0f, ground))
+                    var back = -player.transform.forward;
+                    if (back.sqrMagnitude < 0.01f)
                     {
-                        pos = hit.point;
+                        back = (fallback - playerPos).sqrMagnitude > 0.01f ? (fallback - playerPos).normalized : Vector3.back;
                     }
-                    else if (Physics.Raycast(pos + Vector3.up * 0.5f, Vector3.down, out var hit2, 2.0f, ground))
+                    float r = UnityEngine.Random.Range(minR, maxR);
+                    var candidate = playerPos + back.normalized * r;
+                    var ground = GameplayDataSettings.Layers.groundLayerMask;
+                    if (Physics.Raycast(candidate + Vector3.up * 2f, Vector3.down, out var hit, 4f, ground))
                     {
-                        pos = hit2.point;
+                        candidate = hit.point;
                     }
-                    // If no ground found, IsOpenArea will reject it later anyway
-                }
-                candidates[i] = pos;
-            }
-            var heats = _store.ComputeHeatBatch(candidates, Time.time, 6f);
-            var scores = new float[count];
-            System.Threading.Tasks.Parallel.For(0, count, i =>
-            {
-                var pos = candidates[i];
-                float baseOpen = 1f;
-                float heatPenalty = heats[i];
-                int crowd = GetCrowdDensityApprox(pos, 8f);
-                float crowdPenalty = crowd * 0.15f;
-                scores[i] = baseOpen - crowdPenalty - Mathf.Clamp01(heatPenalty);
-            });
-            var indices = new int[count]; for (int i = 0; i < count; i++) indices[i] = i;
-            System.Array.Sort(indices, (a, b) => scores[b].CompareTo(scores[a]));
-            int validate = Mathf.Min(5, count);
-            var wallMask = GameplayDataSettings.Layers.fowBlockLayers;
-            for (int i = 0; i < validate; i++)
-            {
-                var p = candidates[indices[i]];
-                
-                // Visibility Check (Avoid spawning in plain sight)
-                if (avoidVisibilityFrom.HasValue)
-                {
-                    var from = avoidVisibilityFrom.Value + Vector3.up * 1.6f; // Eye level
-                    var to = p + Vector3.up * 1.5f; // Enemy head level
+                    result = candidate;
+                    var mask = GameplayDataSettings.Layers.fowBlockLayers;
+                    var from = playerPos + Vector3.up * 1.6f;
+                    var to = result + Vector3.up * 1.2f;
                     var dir = to - from;
-                    // If Raycast DOES NOT hit a wall, it means we HAVE line of sight (Bad)
-                    // Use FOW layers to ensure we don't spawn behind a "see-through" wall
-                    if (!Physics.Raycast(from, dir.normalized, dir.magnitude, wallMask))
+                    if (!Physics.Raycast(from, dir.normalized, dir.magnitude, mask))
                     {
-                        continue; 
-                    }
-                }
-
-                if (IsOpenArea(p, 3f)) return p;
-            }
-            return candidates[indices[0]];
-        }
-
-        private void TriggerCrowdUpdate(System.Collections.Generic.List<CharacterMainControl> all)
-        {
-            if (_crowdTask != null)
-            {
-                if (_crowdTask.IsCompleted)
-                {
-                    _lastCrowdUpdateTime = Time.time;
-                    _crowdTask = null;
-                }
-                return;
-            }
-            if (Time.time - _lastCrowdUpdateTime < 0.5f) return;
-            var snap = new System.Collections.Generic.List<Vector3>(all.Count);
-            for (int i = 0; i < all.Count; i++)
-            {
-                var c = all[i];
-                if (c == null || c.IsMainCharacter) continue;
-                snap.Add(c.transform.position);
-            }
-            _crowdTask = System.Threading.Tasks.Task.Run(() =>
-            {
-                var gridFine = new System.Collections.Generic.Dictionary<UnityEngine.Vector2Int, int>();
-                var gridCoarse = new System.Collections.Generic.Dictionary<UnityEngine.Vector2Int, int>();
-                float cf = _crowdCellFine; float cc = _crowdCellCoarse;
-                for (int i = 0; i < snap.Count; i++)
-                {
-                    var p = snap[i];
-                    var kf = new UnityEngine.Vector2Int(Mathf.FloorToInt(p.x / cf), Mathf.FloorToInt(p.z / cf));
-                    var kc = new UnityEngine.Vector2Int(Mathf.FloorToInt(p.x / cc), Mathf.FloorToInt(p.z / cc));
-                    gridFine.TryGetValue(kf, out var vf); gridFine[kf] = vf + 1;
-                    gridCoarse.TryGetValue(kc, out var vc); gridCoarse[kc] = vc + 1;
-                }
-                lock (_crowdGridFine)
-                {
-                    _crowdGridFine.Clear();
-                    foreach (var kv in gridFine) _crowdGridFine[kv.Key] = kv.Value;
-                    _crowdGridCoarse.Clear();
-                    foreach (var kv in gridCoarse) _crowdGridCoarse[kv.Key] = kv.Value;
-                }
-            });
-        }
-
-        private int GetCrowdDensityApprox(Vector3 pos, float radius)
-        {
-            int fine = 0, coarse = 0;
-            float cellFine = _crowdCellFine;
-            float cellCoarse = _crowdCellCoarse;
-            bool indoor = !IsOpenArea(pos, 3f);
-            int rxFine = Mathf.CeilToInt(radius / cellFine);
-            int rxCoarse = Mathf.CeilToInt(radius / cellCoarse);
-            var baseKeyFine = new UnityEngine.Vector2Int(Mathf.FloorToInt(pos.x / cellFine), Mathf.FloorToInt(pos.z / cellFine));
-            var baseKeyCoarse = new UnityEngine.Vector2Int(Mathf.FloorToInt(pos.x / cellCoarse), Mathf.FloorToInt(pos.z / cellCoarse));
-            lock (_crowdGridFine)
-            {
-                for (int dx = -rxFine; dx <= rxFine; dx++)
-                {
-                    for (int dz = -rxFine; dz <= rxFine; dz++)
-                    {
-                        var kf = new UnityEngine.Vector2Int(baseKeyFine.x + dx, baseKeyFine.y + dz);
-                        if (_crowdGridFine.TryGetValue(kf, out var vf)) fine += vf;
+                        var perp = Vector3.Cross(back, Vector3.up).normalized;
+                        candidate = playerPos + (back + perp * (UnityEngine.Random.value < 0.5f ? 1f : -1f)).normalized * r;
+                        if (Physics.Raycast(candidate + Vector3.up * 2f, Vector3.down, out var hit2, 4f, ground))
+                        {
+                            candidate = hit2.point;
+                        }
+                        result = candidate;
                     }
                 }
             }
-            lock (_crowdGridCoarse)
-            {
-                for (int dx = -rxCoarse; dx <= rxCoarse; dx++)
-                {
-                    for (int dz = -rxCoarse; dz <= rxCoarse; dz++)
-                    {
-                        var kc = new UnityEngine.Vector2Int(baseKeyCoarse.x + dx, baseKeyCoarse.y + dz);
-                        if (_crowdGridCoarse.TryGetValue(kc, out var vc)) coarse += vc;
-                    }
-                }
-            }
-            float heat = _store.GetHeatAt(pos, Time.time, 6f);
-            float alphaBase = indoor ? 0.6f : 0.2f;
-            float alpha = Mathf.Clamp01(alphaBase + Mathf.Clamp01(heat));
-            int blended = Mathf.RoundToInt(alpha * fine + (1f - alpha) * coarse);
-            return blended;
+            return result;
         }
 
-        private bool IsOpenArea(Vector3 pos, float radius)
-        {
-            var wall = GameplayDataSettings.Layers.wallLayerMask | GameplayDataSettings.Layers.halfObsticleLayer;
-            
-            // 1. Immediate Collision Check (Anti-Stuck)
-            // Ensure we are not spawning inside a box, wall, or prop
-            if (Physics.CheckSphere(pos + Vector3.up * 0.8f, 0.4f, wall)) return false;
+        
 
-            // Check against known Stuck Spots
-            if (_store.IsStuckSpot(pos, 2.5f)) return false;
+        
 
-            // 2. NavMesh / Walkability Check
-            // Ensure the point is on a valid NavMesh node
-            if (AstarPath.active != null)
-            {
-                var nnInfo = AstarPath.active.GetNearest(pos, NNConstraint.Walkable);
-                if (nnInfo.node == null || !nnInfo.node.Walkable) return false;
-                
-                // If the nearest navmesh point is too far (e.g. through a wall), reject it
-                // Vertical distance check is important for multi-floor
-                if (Mathf.Abs(nnInfo.position.y - pos.y) > 1.5f) return false;
-                if (Vector3.Distance(nnInfo.position, pos) > 2.0f) return false;
-            }
+        
 
-            var ground = GameplayDataSettings.Layers.groundLayerMask;
-            
-            // 3. Ground Snapping (Low Raycast)
-            // Instead of casting from 15m (which hits ceiling), cast from 1.5m
-            if (!Physics.Raycast(pos + Vector3.up * 1.5f, Vector3.down, out var hit, 4.0f, ground)) return false;
-            
-            // 4. Horizontal Clearance Check
-            int blocked = 0;
-            for (int k = 0; k < 8; k++) // Reduced from 12 to 8 for perf
-            {
-                float ang = k * 45f * Mathf.Deg2Rad;
-                var dir = new Vector3(Mathf.Cos(ang), 0f, Mathf.Sin(ang));
-                // Reduced check distance from 6.5f to 2.5f (AI doesn't need THAT much space)
-                if (Physics.Raycast(pos + Vector3.up * 1.0f, dir, 2.5f, wall)) blocked++;
-            }
-            if (blocked > 2) return false;
+        
 
-            // 5. Slope Check
-            float slope = Vector3.Angle(hit.normal, Vector3.up);
-            if (slope > 25f) return false;
-
-            // 6. Locked Room Check (NavMesh Connectivity)
-            // If the path from player to this point is blocked (e.g. locked door), do not spawn here.
-            // This prevents spawning inside locked key rooms.
-            if (AstarPath.active != null && CharacterMainControl.Main != null)
-            {
-                var node1 = AstarPath.active.GetNearest(pos, NNConstraint.Walkable).node;
-                var node2 = AstarPath.active.GetNearest(CharacterMainControl.Main.transform.position, NNConstraint.Walkable).node;
-                
-                if (node1 != null && node2 != null)
-                {
-                    // Check if area is accessible from player's current area
-                    if (!PathUtilities.IsPathPossible(node1, node2)) return false;
-                }
-            }
-
-            return true;
-        }
-
-        private int CountUnitsNear(Vector3 pos, float radius)
-        {
-            int count = 0;
-            for (int i = 0; i < _charactersCache.Count; i++)
-            {
-                var c = _charactersCache[i];
-                if (c == null || c.IsMainCharacter) continue;
-                if (Vector3.Distance(pos, c.transform.position) <= radius) count++;
-            }
-            return count;
-        }
+        
 
         private void GatherLeaderGroup(CharacterMainControl boss)
         {
             if (!_groupAnchors.TryGetValue(boss, out var anchor)) anchor = boss.transform.position;
-            if (!IsOpenArea(anchor, 3f))
-            {
-                anchor = GetOpenAreaNear(anchor, 10f, 25f);
-                _groupAnchors[boss] = anchor;
-            }
             var controllers = UnityEngine.Object.FindObjectsOfType<AICharacterController>();
             int scene = MultiSceneCore.MainScene.HasValue ? MultiSceneCore.MainScene.Value.buildIndex : boss.gameObject.scene.buildIndex;
             foreach (var ai in controllers)
@@ -1074,24 +852,6 @@ namespace BloodMoon
                 }
                 return true;
             }
-            
-            // Fallback: Use NavMesh Random Point if Points are missing
-            if (AstarPath.active != null)
-            {
-                // Try 10 times to find a valid node
-                for(int i=0; i<10; i++) 
-                {
-                    var rnd = UnityEngine.Random.insideUnitCircle * 100f;
-                    var p = new Vector3(rnd.x, 0f, rnd.y);
-                    var nn = AstarPath.active.GetNearest(p, NNConstraint.Walkable);
-                    if (nn.node != null && nn.node.Walkable)
-                    {
-                        pos = (Vector3)nn.position;
-                        return true;
-                    }
-                }
-            }
-            
             return false;
         }
 
@@ -1107,11 +867,12 @@ namespace BloodMoon
                 var player = CharacterMainControl.Main;
                 int scene = MultiSceneCore.MainScene.HasValue ? MultiSceneCore.MainScene.Value.buildIndex : SceneManager.GetActiveScene().buildIndex;
                 _processed.Clear();
-                _minionDoubled.Clear();
                 _pointsCache.Clear();
                 _pointsCache.AddRange(UnityEngine.Object.FindObjectsOfType<Points>());
                 _charactersCache.Clear();
                 _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
+                _wanderersSetupDone = false;
+                DisableVanillaControllersCached();
 
                 _currentScene = scene;
                 _sceneSetupDone = false;
@@ -1138,7 +899,7 @@ namespace BloodMoon
                     bool exists = UnityEngine.Object.FindObjectsOfType<CharacterMainControl>().Any(c => c.characterPreset == preset);
                     if (!exists)
                     {
-                        var anchor = GetOpenAreaAnchorNearPlayer(player);
+                        var anchor = GetSpawnPointOrFallback(player.transform.position);
                         var clone = await preset.CreateCharacterAsync(anchor, Vector3.forward, scene, null, false);
                         if (clone != null)
                         {
@@ -1152,6 +913,7 @@ namespace BloodMoon
                 }
 
                 await EnsureWanderersForLonelyBosses();
+                DisableVanillaControllersCached();
                 _sceneSetupDone = true;
                 _setupRunning = false;
             });
