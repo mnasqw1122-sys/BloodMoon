@@ -53,9 +53,14 @@ namespace BloodMoon
         private bool _canChase = true;
         public bool CanChase => _canChase;
         
+        // --- Healing State ---
+        private float _healWaitTimer;
+        public bool IsHealing => _healWaitTimer > 0f;
+
         // --- Coordination ---
         private CharacterMainControl? _leader;
         private int _wingIndex = -1;
+        public bool IsBoss;
 
         public void SetChaseDelay(float seconds)
         {
@@ -74,10 +79,15 @@ namespace BloodMoon
         private System.Threading.Tasks.Task<UnityEngine.Vector3>? _sepTask;
         private UnityEngine.Vector3 _sepBgResult;
 
-        // --- Search ---
+        // --- Search & Patrol ---
         private Vector3 _searchPoint;
         private float _searchTimer;
+        private Vector3 _patrolTarget;
+        private float _patrolWaitTimer;
         
+        private float _bossCommandCooldown;
+        public bool IsRaged => IsBoss && _c != null && (_c.Health.CurrentHealth / _c.Health.MaxHealth) < 0.4f;
+
         public void Init(CharacterMainControl c, AIDataStore store)
         {
             _c = c;
@@ -103,6 +113,8 @@ namespace BloodMoon
             // Initialize Actions
             _actions.Add(new Action_Unstuck());
             _actions.Add(new Action_Heal());
+            _actions.Add(new Action_BossCommand()); // New Boss Action
+            _actions.Add(new Action_Rush());
             _actions.Add(new Action_Reload());
             _actions.Add(new Action_ThrowGrenade());
             _actions.Add(new Action_Retreat());
@@ -112,6 +124,16 @@ namespace BloodMoon
             _actions.Add(new Action_Flank());
             _actions.Add(new Action_Chase());
             _actions.Add(new Action_Search());
+            _actions.Add(new Action_Patrol());
+
+            var preset = c.characterPreset;
+            if (preset != null && preset.GetCharacterIcon() == GameplayDataSettings.UIStyle.BossCharacterIcon)
+            {
+                IsBoss = true;
+            }
+            
+            // Randomize tick offset to distribute CPU load
+            _aiTickTimer = Random.Range(0f, AI_TICK_INTERVAL);
         }
 
         private float _aiTickTimer;
@@ -121,11 +143,14 @@ namespace BloodMoon
         {
             if (!LevelManager.LevelInited || _c == null || CharacterMainControl.Main == null) return;
             
+            // Safeguard: Ensure vanilla AI stays disabled
+            var vanilla = _c.GetComponent<AICharacterController>();
+            if (vanilla != null && vanilla.enabled) vanilla.enabled = false;
+
             _aliveTime += Time.deltaTime;
             
             // Global Updates (Timers need smooth updates)
             UpdateTimers();
-            _store.DecayAndPrune(Time.time, 120f);
 
             // Throttle Decision Making
             _aiTickTimer += Time.deltaTime;
@@ -178,9 +203,47 @@ namespace BloodMoon
                 _chaseDelayTimer -= Time.deltaTime;
                 if (_chaseDelayTimer <= 0f) _canChase = true;
             }
+            
+            _healWaitTimer -= Time.deltaTime;
+            _bossCommandCooldown -= Time.deltaTime;
         }
         
         // --- Public Action Methods ---
+
+        public bool PerformBossCommand()
+        {
+            if (_bossCommandCooldown > 0f) return false;
+            
+            // Buff nearby minions
+            int count = 0;
+            foreach (var ally in _all)
+            {
+                if (ally == null || ally == this || ally.IsBoss) continue;
+                
+                float d = Vector3.Distance(_c.transform.position, ally.transform.position);
+                if (d < 25f)
+                {
+                    ally.ReceiveBuff();
+                    count++;
+                }
+            }
+            
+            // Visual/Audio feedback could go here
+            // _c.PlaySound("Roar"); 
+            
+            _bossCommandCooldown = 20f; // Cooldown
+            return count > 0;
+        }
+
+        public void ReceiveBuff()
+        {
+            // Morale boost
+            _pressureScore = 0f;
+            _canChase = true;
+            _chaseDelayTimer = 0f;
+            // Maybe force a rush?
+            // _forceAction = ActionType.Rush; 
+        }
 
         public bool HasGrenade()
         {
@@ -195,9 +258,30 @@ namespace BloodMoon
              return false;
         }
 
+        public bool HasHealingItem()
+        {
+             // Check held item first
+             if (_c.CurrentHoldItemAgent != null && _c.CurrentHoldItemAgent.Item.GetComponent<Drug>() != null) return true;
+             
+             var inv = _c.CharacterItem?.Inventory; if (inv == null) return false;
+             foreach(var item in inv) {
+                if(item == null) continue;
+                if(item.GetComponent<Drug>() != null) return true;
+             }
+             return false;
+        }
+
         public bool PerformThrowGrenade()
         {
              var inv = _c.CharacterItem?.Inventory; if (inv == null) return false;
+             
+             // Smart Check: Don't throw if target is too close (< 8m) or too far (> 25m)
+             if (_context.Target != null)
+             {
+                 float d = Vector3.Distance(_c.transform.position, _context.Target.transform.position);
+                 if (d < 8f || d > 25f) return false;
+             }
+
              foreach(var item in inv) {
                 if(item == null) continue;
                 var ss = item.GetComponent<ItemSetting_Skill>();
@@ -246,31 +330,56 @@ namespace BloodMoon
             _c.SetRunInput(false);
             _c.movementControl.SetMoveInput(Vector3.zero);
             
-            // Find cover if exposed?
-            if (_context.HasLoS && _coverCooldown <= 0f)
+            // 1. If holding drug
+            if (_c.CurrentHoldItemAgent != null && _c.CurrentHoldItemAgent.Item.GetComponent<Drug>() != null)
+            {
+                // 2. If holding but not using, use it
+                bool reloading = _c.GetGun()?.IsReloading() ?? false;
+                if (!reloading && _healWaitTimer <= 0f) 
+                {
+                    _c.UseItem(_c.CurrentHoldItemAgent.Item);
+                    _healWaitTimer = 4.0f; // Assume ~4s for healing animation to be safe
+                }
+                return;
+            }
+
+            // 3. Find cover if exposed (unless we are boss and just want to tank it, or very desperate)
+            // Bosses ignore cover check if HP > 40% to be aggressive
+            bool skipCover = IsBoss && _c.Health.CurrentHealth > _c.Health.MaxHealth * 0.4f;
+            if (!skipCover && _context.HasLoS && _coverCooldown <= 0f)
             {
                  if (MoveToCover()) return;
             }
 
-            // Check if we are holding a healing item
-            if (_c.CurrentHoldItemAgent != null && _c.CurrentHoldItemAgent.Item.GetComponent<Drug>() != null)
-            {
-                _c.UseItem(_c.CurrentHoldItemAgent.Item);
-                return;
-            }
-
+            // 4. Find best healing item
             var inv = _c.CharacterItem?.Inventory; 
             if (inv == null) return;
+            
+            Item? bestItem = null;
+            int bestQuality = -1;
+            
             foreach (var item in inv)
             {
                 if (item == null) continue;
-                if (item.GetComponent<Drug>() != null)
+                var d = item.GetComponent<Drug>();
+                if (d != null)
                 {
-                    _c.ChangeHoldItem(item); // Must hold it to use it safely
-                    // Delay use slightly to allow equip
-                    // For now, rely on next frame or UseItem logic
-                    _c.UseItem(item);
-                    return;
+                    // Prefer higher quality items (often better meds)
+                    if (item.Quality > bestQuality) 
+                    { 
+                        bestQuality = item.Quality; 
+                        bestItem = item; 
+                    }
+                }
+            }
+            
+            if (bestItem != null)
+            {
+                // Switch
+                if (_c.CurrentHoldItemAgent?.Item != bestItem)
+                {
+                    _c.ChangeHoldItem(bestItem);
+                    _healWaitTimer = 0.5f; // Wait for equip
                 }
             }
         }
@@ -288,7 +397,25 @@ namespace BloodMoon
             // Move to cover while reloading
             if (_context.HasLoS)
             {
-                MoveToCover();
+                // If exposed, try to move to cover
+                if (MoveToCover()) return;
+                
+                // If no cover found, erratic movement (strafe)
+                // Reuse EngageTarget strafe logic partially or just random move
+                 _strafeTimer -= Time.deltaTime;
+                if (_strafeTimer <= 0f)
+                {
+                    _strafeDir = Random.value > 0.5f ? 1 : -1;
+                    _strafeTimer = 0.5f;
+                }
+                
+                if (_context.Target != null)
+                {
+                     var dir = (_context.Target.transform.position - _c.transform.position).normalized;
+                     var perp = Vector3.Cross(dir, Vector3.up) * _strafeDir;
+                     _c.movementControl.SetMoveInput(perp);
+                     _c.SetRunInput(true); // Run while reloading if possible
+                }
             }
             else
             {
@@ -352,13 +479,22 @@ namespace BloodMoon
             else if (dist > pref + 2f) move = dir + perp * 0.2f; // Close in
             
             _c.movementControl.SetMoveInput(move.normalized);
-            _c.SetRunInput(false);
+            
+            // Tactical Stance: ADS if shooting and not moving fast
+            bool shouldAds = dist > 10f && _shootTimer <= 0f; 
+            _c.SetAdsInput(shouldAds);
+            _c.SetRunInput(!shouldAds && move.magnitude > 0.1f);
             
             // Shooting
             if (_shootTimer <= 0f)
             {
                 _c.Trigger(true, true, false);
-                _shootTimer = Random.Range(0.2f, 0.5f);
+                // Burst logic
+                var gun = _c.GetGun();
+                if (gun != null && gun.BulletDistance > 50f) // Sniper/DMR
+                    _shootTimer = Random.Range(0.8f, 1.5f);
+                else
+                    _shootTimer = Random.Range(0.2f, 0.5f);
             }
             else
             {
@@ -385,27 +521,181 @@ namespace BloodMoon
             }
         }
         
+        public void PerformTacticalFlank()
+        {
+            if (_context.Target == null) return;
+            
+            // Try to find a position that is:
+            // 1. Within range (15-25m)
+            // 2. Has LoS to target (optional, but good for final approach)
+            // 3. Is at an angle > 60 degrees relative to target's forward (Flanking)
+            
+            var targetForward = _context.Target.transform.forward;
+            var targetPos = _context.Target.transform.position;
+            
+            // Try left and right flanks
+            Vector3 bestPos = Vector3.zero;
+            float bestScore = -1f;
+            
+            // Optimized: Fewer iterations, wider spread
+            for (int i = 0; i < 6; i++)
+            {
+                // Sample semi-circle behind/side of target
+                // Angle logic: 90 is right, -90 is left. We want to avoid 0 (front) and 180 (back is okay but maybe too far)
+                // Let's aim for 45-135 degrees relative to player facing
+                
+                float side = (i % 2 == 0) ? 1f : -1f;
+                float angle = UnityEngine.Random.Range(45f, 135f) * side;
+                
+                var rot = Quaternion.AngleAxis(angle, Vector3.up);
+                var dir = rot * targetForward; // Relative to player facing
+                var cand = targetPos + dir * UnityEngine.Random.Range(12f, 22f);
+                
+                // Validate ground
+                if (Physics.Raycast(cand + Vector3.up * 5f, Vector3.down, out var hit, 10f, GameplayDataSettings.Layers.groundLayerMask))
+                {
+                    cand = hit.point;
+                    
+                    // Score: Distance from us (closer is better to minimize travel time) + Flank Angle
+                    float dist = Vector3.Distance(_c.transform.position, cand);
+                    float score = 100f - dist;
+                    
+                    if (score > bestScore)
+                    {
+                        // Check if reachable (navmesh/raycast check roughly)
+                         var origin = _c.transform.position + Vector3.up;
+                         var toCand = cand - _c.transform.position;
+                         // Simple wall check
+                         if (!Physics.Raycast(origin, toCand.normalized, toCand.magnitude, GameplayDataSettings.Layers.wallLayerMask))
+                         {
+                             bestScore = score;
+                             bestPos = cand;
+                         }
+                    }
+                }
+            }
+            
+            if (bestScore > 0f)
+            {
+                MoveTo(bestPos);
+                _c.SetRunInput(true);
+            }
+            else
+            {
+                // Fallback to simple move
+                var dir = Vector3.Cross(_context.DirToTarget, Vector3.up);
+                if (Random.value > 0.5f) dir = -dir;
+                MoveTo(_c.transform.position + dir * 10f);
+            }
+        }
+        
+        public void PerformPatrol()
+        {
+            _patrolWaitTimer -= Time.deltaTime;
+            if (_patrolWaitTimer > 0f)
+            {
+                 _c.movementControl.SetMoveInput(Vector3.zero);
+                 _c.SetRunInput(false);
+                 return;
+            }
+
+            // Pick a new point if we don't have one or are close
+            if (_patrolTarget == Vector3.zero || Vector3.Distance(_c.transform.position, _patrolTarget) < 3f)
+            {
+                // Find a random point on the map
+                // Try 5 times
+                bool found = false;
+                for(int i=0; i<5; i++)
+                {
+                    // Random direction and distance (30m - 80m) for wide roaming
+                    var rnd = Random.insideUnitCircle.normalized * Random.Range(30f, 80f);
+                    var candidate = _c.transform.position + new Vector3(rnd.x, 0, rnd.y);
+                    
+                    if (Physics.Raycast(candidate + Vector3.up * 10f, Vector3.down, out var hit, 20f, GameplayDataSettings.Layers.groundLayerMask))
+                    {
+                        // Check if reachable (simple check)
+                        _patrolTarget = hit.point;
+                        found = true;
+                        break;
+                    }
+                }
+                
+                if (!found)
+                {
+                     // Small move if failed
+                     _patrolTarget = _c.transform.position + _c.transform.forward * 10f;
+                }
+                
+                // Pause before moving to new point
+                _patrolWaitTimer = Random.Range(2f, 5f);
+                return;
+            }
+            
+            MoveTo(_patrolTarget);
+            _c.SetRunInput(false); // Walk during patrol
+        }
+
         public void PerformSearch()
         {
             if (_searchTimer <= 0f)
             {
-                // Pick random point around last known
-                var rnd = Random.insideUnitCircle * 10f;
-                Vector3 p = _context.LastKnownPos + new Vector3(rnd.x, 0f, rnd.y);
-                 if (Physics.Raycast(p + Vector3.up * 5f, Vector3.down, out var hit, 10f, GameplayDataSettings.Layers.groundLayerMask))
-                 {
-                     _searchPoint = hit.point;
-                     _searchTimer = 5f;
-                 }
+                // Intelligent Search: Check near cover points around last known position
+                bool found = false;
+                
+                // Try 5 times to find a cover spot near last known pos
+                for (int i = 0; i < 5; i++)
+                {
+                    var rnd = Random.insideUnitCircle * 15f;
+                    var p = _context.LastKnownPos + new Vector3(rnd.x, 0f, rnd.y);
+                    if (Physics.Raycast(p + Vector3.up * 5f, Vector3.down, out var hit, 10f, GameplayDataSettings.Layers.groundLayerMask))
+                    {
+                        // Check if this spot provides cover relative to... where? 
+                        // Maybe relative to the open area or just a valid nav spot.
+                        // For search, we just want to move around the area.
+                        _searchPoint = hit.point;
+                        found = true;
+                        break;
+                    }
+                }
+                
+                if (!found)
+                {
+                     var rnd = Random.insideUnitCircle * 10f;
+                     var p = _context.LastKnownPos + new Vector3(rnd.x, 0f, rnd.y);
+                     if (Physics.Raycast(p + Vector3.up * 5f, Vector3.down, out var hit, 10f, GameplayDataSettings.Layers.groundLayerMask))
+                        _searchPoint = hit.point;
+                     else
+                        _searchPoint = p;
+                }
+                
+                _searchTimer = 6f;
             }
             _searchTimer -= Time.deltaTime;
             MoveTo(_searchPoint);
             _c.SetRunInput(false);
             
-            // Look around
-             _c.SetAimPoint(_c.transform.position + _c.transform.right * Mathf.Sin(Time.time * 3f) * 10f);
+            // Sweep look
+            float angle = Mathf.Sin(Time.time * 2f) * 60f;
+            var lookDir = Quaternion.AngleAxis(angle, Vector3.up) * _c.transform.forward;
+            _c.SetAimPoint(_c.transform.position + lookDir * 10f);
         }
-        
+        public void PerformRush()
+        {
+            if (_context.Target == null) return;
+            // Move directly to target
+            MoveTo(_context.Target.transform.position);
+            _c.SetRunInput(true);
+            
+            // Shoot while running if possible (hip fire?)
+            _c.SetAimPoint(_context.Target.transform.position + Vector3.up * 1.2f);
+            
+            // Force trigger if we have ammo and line of sight roughly
+            if (_context.HasLoS)
+            {
+                 _c.Trigger(true, true, false);
+            }
+        }
+
         public void PerformUnstuck()
         {
             // Aggressive unstuck
@@ -546,14 +836,21 @@ namespace BloodMoon
             }
             
             var mask = GameplayDataSettings.Layers.fowBlockLayers;
-            for (int i = 0; i < 12; i++)
+            // Optimize: Use 8 rays (45 deg) instead of 12, and start from random offset
+            int startIdx = Random.Range(0, 8);
+            
+            for (int i = 0; i < 8; i++)
             {
-                var angle = i * 30f * Mathf.Deg2Rad;
+                int idx = (startIdx + i) % 8;
+                var angle = idx * 45f * Mathf.Deg2Rad;
                 var offset = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * Random.Range(4f, 10f);
                 var pos = _c.transform.position + offset;
+                
+                // Quick line check from cover to target
                 var origin = pos + Vector3.up * 1.0f;
                 var target = player.transform.position + Vector3.up * 1.2f;
                 var dir = target - origin;
+                
                 if (Physics.Raycast(origin, dir.normalized, dir.magnitude, mask))
                 {
                     // Snap to ground
@@ -590,6 +887,23 @@ namespace BloodMoon
             bool hasPrim = _c.PrimWeaponSlot()?.Content != null;
             bool hasSec = _c.SecWeaponSlot()?.Content != null;
 
+            // --- Emergency Switch Logic ---
+            // If primary is empty and target is close, switch to secondary instantly
+            if (holdingGun && dist < 12f && hasSec)
+            {
+                var gun = _c.GetGun();
+                if (gun != null && gun.BulletCount <= 0 && !gun.IsReloading())
+                {
+                    var sec = _c.SecWeaponSlot().Content;
+                    if (currentHold?.Item != sec)
+                    {
+                        _c.SwitchToWeapon(1); // Secondary
+                        _weaponSwitchTimer = 1.5f;
+                        return;
+                    }
+                }
+            }
+            
             // 1. Critical Close Range Logic (Force Melee if available)
             if (hasMelee && dist < meleeEnterDist)
             {

@@ -18,11 +18,11 @@ namespace BloodMoon
             }
         }
 
-        private const string SaveKey = "BloodMoonEventData";
+        private const string SaveKey = "BloodMoon_EventData";
         private long _offsetTicks;
 
-        private static readonly TimeSpan SleepTime = TimeSpan.FromHours(160);
-        private static readonly TimeSpan ActiveTime = TimeSpan.FromHours(24);
+        private TimeSpan SleepTime => TimeSpan.FromHours(BloodMoon.Utils.ModConfig.Instance.SleepHours);
+        private TimeSpan ActiveTime => TimeSpan.FromHours(BloodMoon.Utils.ModConfig.Instance.ActiveHours);
 
         private long Period => SleepTime.Ticks + ActiveTime.Ticks;
 
@@ -47,7 +47,11 @@ namespace BloodMoon
 
         private void SetRandomOffset()
         {
-            _offsetTicks = UnityEngine.Random.Range(0, 1000000);
+            // Use full period range for better randomization
+            // Random.Range for long is not directly supported in older Unity/System versions 
+            // so we construct it
+            double rnd = UnityEngine.Random.value;
+            _offsetTicks = (long)(rnd * Period);
         }
 
         public bool IsActive(TimeSpan now)

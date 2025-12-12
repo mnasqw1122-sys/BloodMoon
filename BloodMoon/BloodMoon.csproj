@@ -27,5 +27,11 @@
     <Reference Include="$(DuckovPath)$(SubPath)UniTask*">
       <Private>False</Private>
     </Reference>
+    <Reference Include="$(DuckovPath)$(SubPath)DOTween*">
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Lib.Harmony" Version="2.4.1" />
   </ItemGroup>
 </Project>

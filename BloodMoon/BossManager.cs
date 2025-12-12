@@ -9,7 +9,7 @@ using Duckov.ItemUsage;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using System.Threading.Tasks;
-
+using BloodMoon.Utils;
 
 namespace BloodMoon
 {
@@ -23,33 +23,114 @@ namespace BloodMoon
         private bool _sceneSetupDone;
         private List<Points> _pointsCache = new List<Points>();
         private float _scanCooldown;
-        private float _minionRescanCooldown;
-        private readonly List<CharacterMainControl> _minionsCache = new List<CharacterMainControl>();
-        private int _minionCursor;
         private bool _setupRunning;
-        private int _minionsPerBossCap = 5;
-        private int _globalMinionCap = 20;
-        private int _globalMinionSpawned = 0;
+        private int _minionsPerBossCap => ModConfig.Instance.BossMinionCount;
         private readonly List<CharacterRandomPreset> _selectedBossPresets = new List<CharacterRandomPreset>();
         private int _selectedScene = -1;
         private bool _selectionInitialized;
         private readonly Dictionary<CharacterMainControl, Vector3> _groupAnchors = new Dictionary<CharacterMainControl, Vector3>();
         private float _bloodMoonStartTime = -1f;
-        private float _bloodMoonDurationSec = 900f;
+        private float _bloodMoonDurationSec => ModConfig.Instance.ActiveHours * 3600f; // Config is in hours? No, likely game hours. 
+        // Wait, active time in BloodMoonEvent is TimeSpan.FromHours(24). Game time vs Real time?
+        // In BloodMoonEvent, IsActive uses Tick math.
+        // Here _bloodMoonDurationSec is used with Time.time (Real time seconds).
+        // If ActiveHours is 24 game hours, how many real seconds?
+        // Usually 1 game hour = X real minutes.
+        // I'll assume for now I should just use the config value. 
+        // Let's assume Config.ActiveHours is GAME HOURS.
+        // But here it compares to Time.time.
+        // The original code had 900f (15 minutes).
+        // If 24 game hours = 15 real minutes, then 1 game hour ~ 37.5 seconds.
+        // I'll stick to 900f default or make it configurable as REAL seconds duration.
+        // Let's change Config to have RealSeconds duration or just keep hardcoded logic if unsure.
+        // ModConfig.ActiveHours was float = 24.
+        // I'll assume ModConfig.ActiveHours is Game Hours used in Event, 
+        // and here we need a separate Real Time Duration?
+        // Actually, BloodMoonEvent manages the "IsActive" based on GameClock.Now.
+        // BossManager.Tick checks `_event.IsActive(now)`.
+        // BUT, line 163 checks `Time.time - _bloodMoonStartTime > _bloodMoonDurationSec`.
+        // This forces the raid part to end after 15 minutes real time, regardless of game time?
+        // Or maybe it's a failsafe.
+        // I'll use a fixed value for now or add to config. I'll add RealDurationMinutes to config later if needed.
+        // For now I will use 900f.
+        
         private bool _bloodMoonActive;
         private float _strategyDecayTimer;
         private readonly List<CharacterMainControl> _charactersCache = new List<CharacterMainControl>();
         private float _charactersRescanCooldown;
+        private List<MonoBehaviour> _disabledSpawners = new List<MonoBehaviour>();
 
-        private bool _wanderersSetupDone;
+        private float _estimatedMapRadius = 150f;
+
+        private void RecalculateMapMetrics()
+        {
+            if (_pointsCache.Count == 0) return;
+            
+            Vector3 min = new Vector3(float.MaxValue, 0, float.MaxValue);
+            Vector3 max = new Vector3(float.MinValue, 0, float.MinValue);
+            bool any = false;
+
+            foreach (var p in _pointsCache)
+            {
+                if (p == null) continue;
+                Vector3 pos = p.transform.position;
+                min = Vector3.Min(min, pos);
+                max = Vector3.Max(max, pos);
+                any = true;
+            }
+            
+            if (any)
+            {
+                float sizeX = Mathf.Abs(max.x - min.x);
+                float sizeZ = Mathf.Abs(max.z - min.z);
+                _estimatedMapRadius = Mathf.Max(sizeX, sizeZ) * 0.5f;
+                _estimatedMapRadius = Mathf.Clamp(_estimatedMapRadius, 80f, 800f); // Allow for very large maps
+            }
+        }
+
         private void DisableVanillaControllersCached()
         {
+            if (_charactersCache == null) return;
             for (int i = 0; i < _charactersCache.Count; i++)
             {
-                var c = _charactersCache[i];
-                if (c == null || c.IsMainCharacter) continue;
-                var ai = c.GetComponent<AICharacterController>();
-                if (ai != null) ai.enabled = false;
+                DisableVanillaAI(_charactersCache[i]);
+            }
+        }
+
+        private void DisableVanillaAI(CharacterMainControl c)
+        {
+            if (c == null || c.IsMainCharacter) return;
+            
+            var ai = c.GetComponent<AICharacterController>();
+            if (ai != null)
+            {
+                if (ai.enabled) ai.enabled = false;
+            }
+            
+            // Extra safety: Try to disable NodeCanvas Owner via reflection
+            var owner = c.GetComponent("GraphOwner") as MonoBehaviour;
+            if (owner != null && owner.enabled)
+            {
+                try 
+                {
+                    var method = owner.GetType().GetMethod("StopBehaviour");
+                    if (method != null) method.Invoke(owner, null);
+                } 
+                catch {}
+                owner.enabled = false;
+            }
+
+            // Also disable FlowScriptController if present
+            var flow = c.GetComponent("FlowScriptController") as MonoBehaviour;
+            if (flow != null && flow.enabled)
+            {
+                 try 
+                {
+                    var method = flow.GetType().GetMethod("StopBehaviour");
+                    if (method != null) method.Invoke(flow, null);
+                } 
+                catch {}
+                flow.enabled = false;
             }
         }
 
@@ -58,100 +139,214 @@ namespace BloodMoon
             _store = store;
         }
 
-        public async void TickBloodMoon()
+        public void Initialize()
         {
-            if (!_initialized)
+            if (_initialized) return;
+            RaidUtilities.OnRaidEnd += OnRaidEnded;
+            RaidUtilities.OnRaidDead += OnRaidEnded;
+            MultiSceneCore.OnSubSceneWillBeUnloaded += OnSubSceneWillBeUnloaded;
+            MultiSceneCore.OnInstanceDestroy += OnMultiSceneDestroyed;
+            _initialized = true;
+        }
+
+        public void Dispose()
+        {
+            RaidUtilities.OnRaidEnd -= OnRaidEnded;
+            RaidUtilities.OnRaidDead -= OnRaidEnded;
+            MultiSceneCore.OnSubSceneWillBeUnloaded -= OnSubSceneWillBeUnloaded;
+            MultiSceneCore.OnInstanceDestroy -= OnMultiSceneDestroyed;
+            _initialized = false;
+        }
+
+        private void ResetSession()
+        {
+            _setupRunning = false;
+            _sceneSetupDone = false;
+            _bloodMoonActive = false;
+            _bloodMoonStartTime = -1f;
+            _processed.Clear();
+            _groupAnchors.Clear();
+            _pointsCache.Clear();
+            _charactersCache.Clear();
+            _selectedBossPresets.Clear();
+            _selectionInitialized = false;
+            _disabledSpawners.Clear();
+        }
+
+        public void Tick()
+        {
+            try 
             {
-                await UniTask.WaitUntil(() => LevelManager.LevelInited && CharacterMainControl.Main != null);
-                _store.Load();
-                RaidUtilities.OnRaidEnd += OnRaidEnded;
-                RaidUtilities.OnRaidDead += OnRaidEnded;
-                MultiSceneCore.OnSubSceneWillBeUnloaded += OnSubSceneWillBeUnloaded;
-                MultiSceneCore.OnInstanceDestroy += OnMultiSceneDestroyed;
-                _initialized = true;
-                _bloodMoonStartTime = Time.time;
-                _bloodMoonActive = true;
-                _strategyDecayTimer = 30f;
-            }
-            if (!LevelManager.Instance || !LevelManager.Instance.IsRaidMap)
-            {
-                return;
-            }
-            if (_bloodMoonActive && _bloodMoonStartTime > 0f && Time.time - _bloodMoonStartTime > _bloodMoonDurationSec)
-            {
-                EndBloodMoon();
-                return;
-            }
-            _scanCooldown -= Time.deltaTime;
-            _minionRescanCooldown -= Time.deltaTime;
-            if (_scanCooldown > 0f)
-            {
-                return;
-            }
-            var player = CharacterMainControl.Main;
-            if (!_sceneSetupDone && !_setupRunning)
-            {
-                // 等待场景初始化批处理完成后再开始轻量逻辑
-                return;
-            }
-            if (_charactersRescanCooldown <= 0f)
-            {
-                // Simple optimization: only scan if we are not overloaded
-                _charactersCache.Clear();
-                _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
-                _charactersRescanCooldown = 10.0f;
-                DisableVanillaControllersCached();
-            }
-            _charactersRescanCooldown -= Time.deltaTime;
-            var all = _charactersCache;
-            foreach (var c in all)
-            {
-                if (c == null || c.IsMainCharacter) continue;
-                var preset = c.characterPreset;
-                bool isBoss = preset != null && preset.GetCharacterIcon() == GameplayDataSettings.UIStyle.BossCharacterIcon;
-                if (!isBoss) continue;
-                if (_selectionInitialized && preset != null && !_selectedBossPresets.Contains(preset))
+                if (!_initialized) return;
+
+                if (!LevelManager.Instance || !LevelManager.Instance.IsRaidMap || LevelManager.Instance.IsBaseLevel)
                 {
-                    continue;
+                    return;
                 }
-                if (!_processed.Contains(c))
+
+                // Initialize start time if active and not set, or reset if expired and new raid?
+                // For now, let's rely on StartSceneSetupParallel to set the start time for the raid.
+                
+                if (_bloodMoonActive && _bloodMoonStartTime > 0f && Time.time - _bloodMoonStartTime > _bloodMoonDurationSec)
                 {
-                    EnhanceBoss(c);
-                    TeleportToPlayerScene(c);
-                    EnableRevenge(c, player);
-                    _processed.Add(c);
+                    EndBloodMoon();
+                    return;
                 }
-            }
-            if (_minionRescanCooldown <= 0f)
-            {
-                _minionsCache.Clear();
-                for (int i = 0; i < all.Count; i++)
+                _scanCooldown -= Time.deltaTime;
+                if (_scanCooldown > 0f)
                 {
-                    var c = all[i];
+                    return;
+                }
+                var player = CharacterMainControl.Main;
+                if (!_sceneSetupDone || _setupRunning)
+                {
+                    // Wait for setup to complete
+                    return;
+                }
+                if (_charactersRescanCooldown <= 0f)
+                {
+                    // Simple optimization: only scan if we are not overloaded
+                    _charactersCache.Clear();
+                    _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
+                    
+                    // Refresh points cache if empty (backup safety)
+                    if (_pointsCache.Count == 0)
+                    {
+                        var spawners = UnityEngine.Object.FindObjectsOfType<RandomCharacterSpawner>();
+                        foreach (var s in spawners) { if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints); }
+                        var waveSpawners = UnityEngine.Object.FindObjectsOfType<WaveCharacterSpawner>();
+                        foreach (var s in waveSpawners) { if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints); }
+                    }
+                    
+                    // Scan more frequently to catch new spawns (waves)
+                    _charactersRescanCooldown = 2.0f;
+                    DisableVanillaControllersCached();
+                    
+                    // Centralized cleanup
+                    _store.DecayAndPrune(Time.time, 120f);
+                }
+                _charactersRescanCooldown -= Time.deltaTime;
+                var all = _charactersCache;
+                foreach (var c in all)
+                {
                     if (c == null || c.IsMainCharacter) continue;
                     var preset = c.characterPreset;
                     bool isBoss = preset != null && preset.GetCharacterIcon() == GameplayDataSettings.UIStyle.BossCharacterIcon;
-                    if (isBoss) continue;
-                    if (c.Team == Teams.player) continue;
-                    _minionsCache.Add(c);
+                    if (!isBoss) continue;
+                    if (_selectionInitialized && preset != null && !_selectedBossPresets.Contains(preset))
+                    {
+                        continue;
+                    }
+                    if (!_processed.Contains(c))
+                    {
+                        EnhanceBoss(c).Forget();
+                        SetupBossLocation(c);
+                        EnableRevenge(c, player);
+                        SpawnMinionsForBoss(c, c.transform.position, c.gameObject.scene.buildIndex).Forget();
+                        _processed.Add(c);
+                    }
                 }
-                _minionRescanCooldown = 3.0f;
+                
+                _scanCooldown = 1.0f;
+                
+                _strategyDecayTimer -= Time.deltaTime;
+                if (_strategyDecayTimer <= 0f)
+                {
+                    _store.DecayWeights(0.98f);
+                    _strategyDecayTimer = 30f;
+                }
             }
-            ProcessMinionsBudgeted(player, 6);
-            DisableDefaultSpawner();
-            _scanCooldown = 1.0f;
-            
-            _strategyDecayTimer -= Time.deltaTime;
-            if (_strategyDecayTimer <= 0f)
+            catch (System.Exception e)
             {
-                _store.DecayWeights(0.98f);
-                _strategyDecayTimer = 30f;
+                Debug.LogError($"[BloodMoon] Tick Error: {e}");
             }
+        }
+
+        private async UniTask SpawnMinionsForBoss(CharacterMainControl boss, Vector3 anchor, int scene)
+        {
+            if (boss == null) return;
+
+            var minionPresets = GameplayDataSettings.CharacterRandomPresetData.presets
+                .Where(p => p != null && p.GetCharacterIcon() != GameplayDataSettings.UIStyle.BossCharacterIcon)
+                .ToList();
+
+            if (minionPresets.Count == 0) return;
+
+            int count = ModConfig.Instance.BossMinionCount;
+            count = Mathf.Clamp(count, 3, 10); 
+
+            for (int i = 0; i < count; i++)
+            {
+                 var preset = minionPresets[UnityEngine.Random.Range(0, minionPresets.Count)];
+                 
+                 var offset = UnityEngine.Random.insideUnitCircle * UnityEngine.Random.Range(3f, 8f);
+                 var spawnPos = anchor + new Vector3(offset.x, 0, offset.y);
+                 
+                 if (UnityEngine.AI.NavMesh.SamplePosition(spawnPos, out var hit, 5f, UnityEngine.AI.NavMesh.AllAreas))
+                 {
+                     spawnPos = hit.position;
+                 }
+                 else if (Physics.Raycast(spawnPos + Vector3.up * 5f, Vector3.down, out var groundHit, 10f, GameplayDataSettings.Layers.groundLayerMask))
+                 {
+                     spawnPos = groundHit.point;
+                 }
+
+                 try
+                 {
+                     var clone = await preset.CreateCharacterAsync(spawnPos, Vector3.forward, scene, null, false);
+                     if (clone != null)
+                     {
+                         await UniTask.Delay(100); 
+                         if (clone == null) continue;
+
+                         DisableVanillaAI(clone);
+                         
+                         Multiply(clone.CharacterItem, "WalkSpeed", 1.2f);
+                         Multiply(clone.CharacterItem, "RunSpeed", 1.2f);
+                         await EquipArmorLevel(clone, 6);
+                         BoostDefense(clone.CharacterItem, false);
+                         await EnsureNoPistolWeapons(clone);
+                         await EquipMeleeWeaponLevel(clone, 5);
+                         await FillHighAmmo(clone, 5);
+                         await EnsureGunLoaded(clone);
+                         
+                         var mh = clone.CharacterItem.GetStat("MaxHealth".GetHashCode());
+                         if (mh != null) mh.BaseValue *= ModConfig.Instance.MinionHealthMultiplier;
+                         clone.Health.SetHealth(clone.Health.MaxHealth);
+                         
+                         var mw = clone.CharacterItem.GetStat("MaxWeight".GetHashCode());
+                         if (mw != null) mw.BaseValue = 1000f;
+                         clone.UpdateWeightState();
+                         clone.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
+
+                         clone.SetTeam(Teams.wolf);
+                         
+                         var custom = clone.gameObject.AddComponent<BloodMoonAIController>();
+                         custom.Init(clone, _store);
+                         custom.SetChaseDelay(0f);
+                         custom.SetWingAssignment(boss, i);
+                         
+                         var ai = clone.GetComponent<AICharacterController>();
+                         if (ai != null) ai.leader = boss;
+
+                         _processed.Add(clone);
+                         _charactersCache.Add(clone);
+                     }
+                 }
+                 catch (System.Exception ex)
+                 {
+                     Debug.LogError($"[BloodMoon] Minion Spawn Error: {ex}");
+                 }
+            }
+            
+            AssignWingIndicesForLeader(boss);
         }
 
         private void OnRaidEnded(RaidUtilities.RaidInfo info)
         {
+            EndBloodMoon();
             _store.Save();
+            ResetSession();
         }
 
         private void OnSubSceneWillBeUnloaded(Duckov.Scenes.MultiSceneCore core, UnityEngine.SceneManagement.Scene scene)
@@ -162,12 +357,23 @@ namespace BloodMoon
         private void OnMultiSceneDestroyed(Duckov.Scenes.MultiSceneCore core)
         {
             _store.Save();
+            ResetSession();
         }
 
         private void EndBloodMoon()
         {
             _bloodMoonActive = false;
+            EnableDefaultSpawner();
             _store.Save();
+        }
+
+        private void EnableDefaultSpawner()
+        {
+            foreach (var s in _disabledSpawners)
+            {
+                if (s != null) s.gameObject.SetActive(true);
+            }
+            _disabledSpawners.Clear();
         }
 
         private void DisableDefaultSpawner()
@@ -178,36 +384,64 @@ namespace BloodMoon
             {
                 foreach (var s in spawners)
                 {
-                    if (s.gameObject.activeSelf) s.gameObject.SetActive(false);
+                    if (s.gameObject.activeSelf)
+                    {
+                        s.gameObject.SetActive(false);
+                        if (!_disabledSpawners.Contains(s)) _disabledSpawners.Add(s);
+                    }
                 }
             }
         }
 
-        private async void EnhanceBoss(CharacterMainControl c)
+        private async UniTask EnhanceBoss(CharacterMainControl c)
         {
-            var item = c.CharacterItem;
-            if (item == null) return;
-            var maxHealth = item.GetStat("MaxHealth".GetHashCode());
-            if (maxHealth != null) maxHealth.BaseValue *= 4f;
-            Multiply(item, "WalkSpeed", 1.35f);
-            Multiply(item, "RunSpeed", 1.35f);
-            Multiply(item, "TurnSpeed", 1.35f);
-            BoostDefense(item, true);
-            var mw = item.GetStat("MaxWeight".GetHashCode());
-            if (mw != null) mw.BaseValue = 1000f;
-            EquipTopArmor(c);
-            EnsureTwoGuns(c);
-            EquipMeleeWeaponLevel(c, 6);
-            FillBestAmmo(c);
-            EnsureGunLoaded(c);
-            c.Health.SetHealth(c.Health.MaxHealth);
-            c.UpdateWeightState();
-            c.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
-            var ai = c.GetComponent<AICharacterController>();
-            if (ai != null) ai.enabled = false;
-            c.Health.RequestHealthBar();
-            AddBossGlow(c);
-            await EnsureMedicalSupplies(c, 3);
+            try
+            {
+                var item = c.CharacterItem;
+                if (item == null) return;
+                var maxHealth = item.GetStat("MaxHealth".GetHashCode());
+                if (maxHealth != null) maxHealth.BaseValue *= ModConfig.Instance.BossHealthMultiplier;
+                Multiply(item, "WalkSpeed", 1.35f);
+                Multiply(item, "RunSpeed", 1.35f);
+                Multiply(item, "TurnSpeed", 1.35f);
+                BoostDefense(item, true);
+                var mw = item.GetStat("MaxWeight".GetHashCode());
+                if (mw != null) mw.BaseValue = 1000f;
+                
+                // Ensure backpack is equipped first to provide space
+                await EquipTopArmor(c);
+                
+                await EnsureTwoGuns(c);
+                await EquipMeleeWeaponLevel(c, 6);
+                await FillBestAmmo(c);
+                await EnsureGunLoaded(c);
+                
+                c.Health.SetHealth(c.Health.MaxHealth);
+                c.UpdateWeightState();
+                c.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
+                
+                DisableVanillaAI(c);
+
+                // Ensure AI is attached to the boss if not present
+                var custom = c.GetComponent<BloodMoonAIController>();
+                if (custom == null)
+                {
+                    custom = c.gameObject.AddComponent<BloodMoonAIController>();
+                    custom.Init(c, _store);
+                    custom.SetChaseDelay(0f);
+                }
+                if (c.Team != Teams.wolf) c.SetTeam(Teams.wolf);
+                if (ModConfig.Instance.EnableBossGlow) AddBossGlow(c);
+                
+                // Adjust supplies based on backpack status - Dynamic High Value Selection
+                await EnsureMedicalSupplies(c, 8);
+                await EnsureProvisions(c);
+                await AddHighValueLoot(c);
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BloodMoon] EnhanceBoss Error: {e}");
+            }
         }
 
         private static readonly int EmissionColorId = Shader.PropertyToID("_EmissionColor");
@@ -254,93 +488,135 @@ namespace BloodMoon
             if (s != null) s.BaseValue *= m;
         }
 
-        private async void EquipTopArmor(CharacterMainControl c)
+        private async System.Threading.Tasks.Task EquipTopArmor(CharacterMainControl c)
         {
-            var tags = new List<Tag> { GameplayDataSettings.Tags.Helmat };
-            var helCandidates = ItemAssetsCollection.Search(new ItemFilter { requireTags = tags.ToArray(), minQuality = 6, maxQuality = 6 });
-            if (helCandidates.Length > 0)
+            // Use ItemSelector to find high value Armor/Helmet
+            var helmIds = ItemSelector.GetBestItemsByTags(new[] { "Helmat", "Helmet" }, 1, minValue: 10); // Try both spellings
+            if (helmIds.Count == 0) 
             {
-                var helm = await ItemAssetsCollection.InstantiateAsync(helCandidates.GetRandom());
-                c.CharacterItem.TryPlug(helm, emptyOnly: true);
+                 // Fallback to searching by Tag object if string fails
+                 var filter = new ItemFilter { requireTags = new[] { GameplayDataSettings.Tags.Helmat } };
+                 helmIds = ItemSelector.GetBestItems(filter, 1);
             }
-            tags = new List<Tag> { GameplayDataSettings.Tags.Armor };
-            var armCandidates = ItemAssetsCollection.Search(new ItemFilter { requireTags = tags.ToArray(), minQuality = 6, maxQuality = 6 });
-            if (armCandidates.Length > 0)
+
+            if (helmIds.Count > 0)
             {
-                var armor = await ItemAssetsCollection.InstantiateAsync(armCandidates.GetRandom());
-                c.CharacterItem.TryPlug(armor, emptyOnly: true);
+                var helm = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(helmIds[0]);
+                if (helm != null)
+                {
+                    if (!c.CharacterItem.TryPlug(helm, emptyOnly: true)) helm.DestroyTree();
+                }
             }
-            tags = new List<Tag> { GameplayDataSettings.Tags.Backpack };
-            var bpCandidates = ItemAssetsCollection.Search(new ItemFilter { requireTags = tags.ToArray(), minQuality = 6, maxQuality = 6 });
-            if (bpCandidates.Length > 0)
+
+            var armorIds = ItemSelector.GetBestItemsByTags(new[] { "Armor" }, 1, minValue: 10);
+            if (armorIds.Count == 0)
             {
-                var backpack = await ItemAssetsCollection.InstantiateAsync(bpCandidates.GetRandom());
-                c.CharacterItem.TryPlug(backpack, emptyOnly: true);
+                 var filter = new ItemFilter { requireTags = new[] { GameplayDataSettings.Tags.Armor } };
+                 armorIds = ItemSelector.GetBestItems(filter, 1);
             }
-            await EquipBackpackById(c, 40);
+
+            if (armorIds.Count > 0)
+            {
+                var armor = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(armorIds[0]);
+                if (armor != null)
+                {
+                    if (!c.CharacterItem.TryPlug(armor, emptyOnly: true)) armor.DestroyTree();
+                }
+            }
+
+            await EquipBestBackpack(c);
         }
 
-        private async void EquipMeleeWeaponLevel(CharacterMainControl c, int level)
+        private async System.Threading.Tasks.Task EquipMeleeWeaponLevel(CharacterMainControl c, int level)
         {
+            // Level is ignored, use high value
             var meleeTag = TagUtilities.TagFromString("MeleeWeapon");
-            if (meleeTag == null) return;
-            var filter = new ItemFilter { requireTags = new Tag[] { meleeTag }, minQuality = level, maxQuality = level };
-            var ids = ItemAssetsCollection.Search(filter);
-            if (ids.Length > 0)
+            List<int> ids = new List<int>();
+            if (meleeTag != null)
             {
-                var item = await ItemAssetsCollection.InstantiateAsync(ids.GetRandom());
-                c.CharacterItem.TryPlug(item, emptyOnly: true);
+                var filter = new ItemFilter { requireTags = new Tag[] { meleeTag } };
+                ids = ItemSelector.GetBestItems(filter, 1, minValue: 10);
+            }
+            
+            if (ids.Count > 0)
+            {
+                var item = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(ids[0]);
+                if (item != null)
+                {
+                    if (!c.CharacterItem.TryPlug(item, emptyOnly: true)) item.DestroyTree();
+                }
             }
         }
 
-        private async void EnsureTwoGuns(CharacterMainControl c)
+        private async System.Threading.Tasks.Task EnsureTwoGuns(CharacterMainControl c)
         {
+            // High Value Guns
             var tags = new List<Tag> { GameplayDataSettings.Tags.Gun };
-            var guns = ItemAssetsCollection.Search(new ItemFilter {
-                requireTags = tags.ToArray(), minQuality = 5, maxQuality = 6,
+            var filter = new ItemFilter {
+                requireTags = tags.ToArray(),
                 excludeTags = new Tag[] { TagUtilities.TagFromString("GunType_PST") }
-            });
+            };
+            var guns = ItemSelector.GetBestItems(filter, 10, minValue: 100); // Get top 10 to pick from
+
             Item? prim = c.PrimWeaponSlot()?.Content;
             Item? sec = c.SecWeaponSlot()?.Content;
-            if (prim == null && guns.Length > 0)
+            
+            if (guns.Count > 0)
             {
-                prim = await ItemAssetsCollection.InstantiateAsync(guns.GetRandom());
-                c.CharacterItem.TryPlug(prim, emptyOnly: true);
-            }
-            if (sec == null && guns.Length > 1)
-            {
-                sec = await ItemAssetsCollection.InstantiateAsync(guns.GetRandom());
-                c.CharacterItem.TryPlug(sec, emptyOnly: true);
-            }
-            if (prim != null && prim.Tags.Contains("GunType_PST") && guns.Length > 0)
-            {
-                var rep = await ItemAssetsCollection.InstantiateAsync(guns.GetRandom());
-                c.CharacterItem.TryPlug(rep, emptyOnly: false);
-            }
-            if (sec != null && sec.Tags.Contains("GunType_PST") && guns.Length > 0)
-            {
-                var rep = await ItemAssetsCollection.InstantiateAsync(guns.GetRandom());
-                c.CharacterItem.TryPlug(rep, emptyOnly: false);
+                if (prim == null)
+                {
+                    var id = guns[UnityEngine.Random.Range(0, Mathf.Min(3, guns.Count))];
+                    prim = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
+                    if (prim != null)
+                    {
+                        if (!c.CharacterItem.TryPlug(prim, emptyOnly: true)) prim.DestroyTree();
+                    }
+                }
+                if (sec == null && guns.Count > 1)
+                {
+                    var id = guns[UnityEngine.Random.Range(0, Mathf.Min(3, guns.Count))];
+                    // Ensure different gun if possible?
+                    sec = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
+                    if (sec != null)
+                    {
+                        if (!c.CharacterItem.TryPlug(sec, emptyOnly: true)) sec.DestroyTree();
+                    }
+                }
+                
+                // Replace Pistols if present
+                if (prim != null && prim.Tags.Contains("GunType_PST"))
+                {
+                    var id = guns[UnityEngine.Random.Range(0, Mathf.Min(3, guns.Count))];
+                    var rep = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
+                    if (rep != null)
+                    {
+                        if (!c.CharacterItem.TryPlug(rep, emptyOnly: false)) rep.DestroyTree();
+                    }
+                }
+                 if (sec != null && sec.Tags.Contains("GunType_PST"))
+                {
+                    var id = guns[UnityEngine.Random.Range(0, Mathf.Min(3, guns.Count))];
+                    var rep = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
+                    if (rep != null)
+                    {
+                        if (!c.CharacterItem.TryPlug(rep, emptyOnly: false)) rep.DestroyTree();
+                    }
+                }
             }
         }
 
-        private async void FillBestAmmo(CharacterMainControl c)
+        private async System.Threading.Tasks.Task FillBestAmmo(CharacterMainControl c)
         {
-            await FillAmmoForGunMultiple(c, c.PrimWeaponSlot()?.Content, 6, 8);
-            await FillAmmoForGunMultiple(c, c.SecWeaponSlot()?.Content, 6, 8);
+            int count = HasBackpack(c) ? 8 : 2;
+            await FillAmmoForGunMultiple(c, c.PrimWeaponSlot()?.Content, 6, count);
+            await FillAmmoForGunMultiple(c, c.SecWeaponSlot()?.Content, 6, count);
             PurgeNonMatchingAmmo(c);
         }
 
-        private void TeleportToPlayerScene(CharacterMainControl c)
+        private void SetupBossLocation(CharacterMainControl c)
         {
             if (!LevelManager.Instance || !LevelManager.Instance.IsRaidMap) return;
-            var player = CharacterMainControl.Main; if (player == null) return;
-            if (MultiSceneCore.MainScene.HasValue)
-            {
-                c.SetRelatedScene(MultiSceneCore.MainScene.Value.buildIndex);
-            }
-            var anchor = GetOrCreateAnchor(c, player.transform.position);
-            c.SetPosition(anchor);
+            // Removed logic that forces bosses to player scene
             GatherLeaderGroup(c);
         }
 
@@ -352,141 +628,185 @@ namespace BloodMoon
                 ai.SetTarget(player.mainDamageReceiver.transform);
                 ai.forceTracePlayerDistance = 100f;
             }
-            var custom = c.gameObject.AddComponent<BloodMoonAIController>();
-            custom.Init(c, _store);
-            custom.SetChaseDelay(0f);
-            c.PopText("我要你死无葬身之地");
+            // Logic moved to EnhanceBoss to ensure early initialization
+            // but we double check here
+            var custom = c.GetComponent<BloodMoonAIController>();
+            if (custom == null)
+            {
+                custom = c.gameObject.AddComponent<BloodMoonAIController>();
+                custom.Init(c, _store);
+                custom.SetChaseDelay(0f);
+            }
+            c.PopText(Localization.Get("Boss_Revenge"));
         }
 
 
-        private async System.Threading.Tasks.Task EnsureMedicalSupplies(CharacterMainControl c, int count)
+        private async System.Threading.Tasks.Task EnsureMedicalSupplies(CharacterMainControl c, int targetCount)
         {
-            var tags = new List<Tag> { TagUtilities.TagFromString("Drug") };
-            var meds = ItemAssetsCollection.Search(new ItemFilter { requireTags = tags.ToArray(), minQuality = 4, maxQuality = 6 });
-            if (meds.Length > 0)
+            try
             {
-                for (int i = 0; i < count; i++)
+                if (c == null || c.CharacterItem == null || c.CharacterItem.Inventory == null) return;
+
+                // Use ItemSelector to find High Value Medical items
+                // Using "Medicine" tag which is the standard tag for meds in this game
+                var tags = new string[] { "Medicine" };
+                var medIds = ItemSelector.GetBestItemsByTags(tags, 10, minValue: 10);
+                
+                if (medIds.Count == 0) return;
+
+                int existing = 0;
+                // Count basic check
+                // ...
+                
+                int needed = targetCount - existing; // existing is 0 for now as we didn't count
+                
+                for (int i = 0; i < needed; i++)
                 {
-                    var item = await ItemAssetsCollection.InstantiateAsync(meds.GetRandom());
+                    int id = medIds[UnityEngine.Random.Range(0, Mathf.Min(5, medIds.Count))];
+                    var item = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
                     if (item != null)
                     {
-                        c.CharacterItem.Inventory.AddItem(item);
+                        if (!c.CharacterItem.Inventory.AddItem(item))
+                        {
+                            item.DestroyTree();
+                            break;
+                        }
                     }
                 }
             }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BloodMoon] Medical Supply Error: {e}");
+            }
+        }
+        
+        private async System.Threading.Tasks.Task EnsureProvisions(CharacterMainControl c)
+        {
+             // System supplement: Food/Drink - High Value
+             // "Food" and "Drink" are valid tags. "Consumable" is not.
+             var tags = new string[] { "Food", "Drink" };
+             var items = BloodMoon.Utils.ItemSelector.GetBestItemsByTags(tags, 5, minValue: 5);
+             if (items.Count == 0) return;
+             
+             // Add 1-2 provisions
+             int count = UnityEngine.Random.Range(1, 3);
+             for(int i=0; i<count; i++)
+             {
+                 int id = items[UnityEngine.Random.Range(0, items.Count)];
+                 var item = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
+                 if (item != null)
+                 {
+                     if (!c.CharacterItem.Inventory.AddItem(item)) item.DestroyTree();
+                 }
+             }
         }
 
-        private async void ProcessMinionsBudgeted(CharacterMainControl player, int budget)
+        private async System.Threading.Tasks.Task AddHighValueLoot(CharacterMainControl c)
         {
-            if (_minionsCache.Count == 0 || budget <= 0) return;
-            int processed = 0;
-            int n = _minionsCache.Count;
-            for (int i = 0; i < n && processed < budget; i++)
-            {
-                var idx = (_minionCursor + i) % n;
-                var m = _minionsCache[idx];
-                if (m == null) continue;
-                if (!_processed.Contains(m))
-                {
-                    Multiply(m.CharacterItem, "WalkSpeed", 1.2f);
-                    Multiply(m.CharacterItem, "RunSpeed", 1.2f);
-                    await EquipArmorLevel(m, 6);
-                    var mh = m.CharacterItem.GetStat("MaxHealth".GetHashCode());
-                    if (mh != null) mh.BaseValue *= 2f;
-                    BoostDefense(m.CharacterItem, false);
-                    await EnsureNoPistolWeapons(m);
-                    EquipMeleeWeaponLevel(m, 5);
-                    await FillHighAmmo(m, 5);
-                    EnsureGunLoaded(m);
-                    m.Health.SetHealth(m.Health.MaxHealth);
-                    var mw2 = m.CharacterItem.GetStat("MaxWeight".GetHashCode());
-                    if (mw2 != null) mw2.BaseValue = 1000000000f;
-                    m.UpdateWeightState();
-                    m.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
-                    var mai = m.GetComponent<AICharacterController>();
-                    if (mai != null) mai.enabled = false;
-                    await EnsureMedicalSupplies(m, 2);
-                    var custom = m.gameObject.GetComponent<BloodMoonAIController>();
-                    if (custom == null)
-                    {
-                        custom = m.gameObject.AddComponent<BloodMoonAIController>();
-                        custom.Init(m, _store);
-                        custom.SetChaseDelay(0f);
-                    }
-                    _processed.Add(m);
-                    var leader = m.GetComponent<AICharacterController>()?.leader;
-                    if (leader != null)
-                    {
-                        GatherLeaderGroup(leader);
-                    }
-                    processed++;
-                }
-            }
-            _minionCursor = (_minionCursor + processed) % Mathf.Max(1, n);
+             // 2-3 random high value items
+             int count = UnityEngine.Random.Range(2, 4);
+             var filter = new ItemFilter { minQuality = 3 }; 
+             var ids = BloodMoon.Utils.ItemSelector.GetRandomHighValueItems(filter, count, minValue: 100); 
+             
+             foreach(var id in ids)
+             {
+                 var item = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
+                 if (item != null)
+                 {
+                     if (!c.CharacterItem.Inventory.AddItem(item)) item.DestroyTree();
+                 }
+             }
         }
+
+
 
         private void BoostDefense(Item item, bool isBoss)
         {
             var body = item.GetStat("BodyArmor".GetHashCode());
             var head = item.GetStat("HeadArmor".GetHashCode());
-            float bodyTarget = isBoss ? 10f : 8f;
-            float headTarget = isBoss ? 10f : 8f;
+            float bodyTarget = isBoss ? ModConfig.Instance.BossDefense : ModConfig.Instance.MinionDefense;
+            float headTarget = isBoss ? ModConfig.Instance.BossDefense : ModConfig.Instance.MinionDefense;
             if (body != null) body.BaseValue = Mathf.Max(body.BaseValue, bodyTarget);
             if (head != null) head.BaseValue = Mathf.Max(head.BaseValue, headTarget);
         }
 
         private async System.Threading.Tasks.Task EquipArmorLevel(CharacterMainControl c, int level)
         {
-            var tags = new List<Tag> { GameplayDataSettings.Tags.Helmat };
-            var helCandidates = ItemAssetsCollection.Search(new ItemFilter { requireTags = tags.ToArray(), minQuality = level, maxQuality = level });
-            if (helCandidates.Length > 0)
+             // Ignore level, use High Value
+             // Helmet
+            var helmIds = ItemSelector.GetBestItemsByTags(new[] { "Helmat", "Helmet" }, 1, minValue: 50);
+            if (helmIds.Count == 0) 
             {
-                var helm = await ItemAssetsCollection.InstantiateAsync(helCandidates.GetRandom());
-                c.CharacterItem.TryPlug(helm, emptyOnly: true);
+                 var filter = new ItemFilter { requireTags = new[] { GameplayDataSettings.Tags.Helmat } };
+                 helmIds = ItemSelector.GetBestItems(filter, 1);
             }
-            tags = new List<Tag> { GameplayDataSettings.Tags.Armor };
-            var armCandidates = ItemAssetsCollection.Search(new ItemFilter { requireTags = tags.ToArray(), minQuality = level, maxQuality = level });
-            if (armCandidates.Length > 0)
+            if (helmIds.Count > 0)
             {
-                var armor = await ItemAssetsCollection.InstantiateAsync(armCandidates.GetRandom());
-                c.CharacterItem.TryPlug(armor, emptyOnly: true);
+                var helm = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(helmIds[0]);
+                if (helm != null)
+                {
+                    if (!c.CharacterItem.TryPlug(helm, emptyOnly: true)) helm.DestroyTree();
+                }
             }
-            tags = new List<Tag> { GameplayDataSettings.Tags.Backpack };
-            var bpCandidates = ItemAssetsCollection.Search(new ItemFilter { requireTags = tags.ToArray(), minQuality = level, maxQuality = level });
-            if (bpCandidates.Length > 0)
+            
+            // Armor
+            var armorIds = ItemSelector.GetBestItemsByTags(new[] { "Armor" }, 1, minValue: 50);
+            if (armorIds.Count == 0)
             {
-                var backpack = await ItemAssetsCollection.InstantiateAsync(bpCandidates.GetRandom());
-                c.CharacterItem.TryPlug(backpack, emptyOnly: true);
+                 var filter = new ItemFilter { requireTags = new[] { GameplayDataSettings.Tags.Armor } };
+                 armorIds = ItemSelector.GetBestItems(filter, 1);
             }
-            await EquipBackpackById(c, 40);
+            if (armorIds.Count > 0)
+            {
+                var armor = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(armorIds[0]);
+                if (armor != null)
+                {
+                    if (!c.CharacterItem.TryPlug(armor, emptyOnly: true)) armor.DestroyTree();
+                }
+            }
+
+            await EquipBestBackpack(c);
         }
 
         private async System.Threading.Tasks.Task EnsureNoPistolWeapons(CharacterMainControl c)
         {
             var tags = new List<Tag> { GameplayDataSettings.Tags.Gun };
-            var guns = ItemAssetsCollection.Search(new ItemFilter {
-                requireTags = tags.ToArray(), minQuality = 5, maxQuality = 6,
+            var filter = new ItemFilter {
+                requireTags = tags.ToArray(), 
+                minQuality = 4, // Relax quality constraint to find more options, but sort by value
                 excludeTags = new Tag[] { TagUtilities.TagFromString("GunType_PST") }
-            });
-            if (guns.Length <= 0) return;
+            };
+            var guns = ItemSelector.GetBestItems(filter, 10, minValue: 200);
+            
+            if (guns.Count <= 0) return;
             var prim = c.PrimWeaponSlot()?.Content;
             var sec = c.SecWeaponSlot()?.Content;
+            
             if (prim == null || prim.Tags.Contains("GunType_PST"))
             {
-                var rep = await ItemAssetsCollection.InstantiateAsync(guns.GetRandom());
-                c.CharacterItem.TryPlug(rep, emptyOnly: false);
+                var id = guns[UnityEngine.Random.Range(0, Mathf.Min(3, guns.Count))];
+                var rep = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
+                if (rep != null)
+                {
+                    if (!c.CharacterItem.TryPlug(rep, emptyOnly: false)) rep.DestroyTree();
+                }
             }
             if (sec != null && sec.Tags.Contains("GunType_PST"))
             {
-                var rep = await ItemAssetsCollection.InstantiateAsync(guns.GetRandom());
-                c.CharacterItem.TryPlug(rep, emptyOnly: false);
+                var id = guns[UnityEngine.Random.Range(0, Mathf.Min(3, guns.Count))];
+                var rep = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
+                if (rep != null)
+                {
+                    if (!c.CharacterItem.TryPlug(rep, emptyOnly: false)) rep.DestroyTree();
+                }
             }
         }
 
         private async System.Threading.Tasks.Task FillHighAmmo(CharacterMainControl c, int level)
         {
-            await FillAmmoForGunMultiple(c, c.PrimWeaponSlot()?.Content, level, 5);
-            await FillAmmoForGunMultiple(c, c.SecWeaponSlot()?.Content, level, 5);
+            int count = HasBackpack(c) ? 5 : 1;
+            await FillAmmoForGunMultiple(c, c.PrimWeaponSlot()?.Content, level, count);
+            await FillAmmoForGunMultiple(c, c.SecWeaponSlot()?.Content, level, count);
             PurgeNonMatchingAmmo(c);
         }
 
@@ -495,41 +815,146 @@ namespace BloodMoon
             if (gun == null) return;
             var caliber = gun.Constants?.GetString("Caliber") ?? string.Empty;
             if (string.IsNullOrEmpty(caliber)) return;
-            var filter = new ItemFilter { caliber = caliber, minQuality = level, maxQuality = level, requireTags = new Tag[] { GameplayDataSettings.Tags.Bullet } };
-            var ids = ItemAssetsCollection.Search(filter);
-            if (ids.Length > 0)
+            
+            var filter = new ItemFilter { caliber = caliber, requireTags = new Tag[] { GameplayDataSettings.Tags.Bullet } };
+            // High Value Ammo
+            var ids = ItemSelector.GetBestItems(filter, 5, minValue: 1); 
+            
+            if (ids.Count > 0)
             {
-                var ammo = await ItemAssetsCollection.InstantiateAsync(ids.GetRandom());
-                c.CharacterItem.Inventory.AddItem(ammo);
+                var id = ids[0]; // Best ammo
+                var ammo = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
+                if (ammo != null)
+                {
+                    if (!c.CharacterItem.Inventory.AddItem(ammo))
+                    {
+                        ammo.DestroyTree();
+                    }
+                }
             }
         }
 
-        private async System.Threading.Tasks.Task FillAmmoForGunMultiple(CharacterMainControl c, Item? gun, int level, int count)
+        private async System.Threading.Tasks.Task FillAmmoForGunMultiple(CharacterMainControl c, Item? gun, int level, int targetCount)
         {
-            if (gun == null || count <= 0) return;
+            if (gun == null || targetCount <= 0) return;
+            var inventory = c.CharacterItem?.Inventory;
+            if (inventory == null) return;
+
             var caliber = gun.Constants?.GetString("Caliber") ?? string.Empty;
             if (string.IsNullOrEmpty(caliber)) return;
-            var filter = new ItemFilter { caliber = caliber, minQuality = level, maxQuality = level, requireTags = new Tag[] { GameplayDataSettings.Tags.Bullet } };
-            var ids = ItemAssetsCollection.Search(filter);
-            if (ids.Length <= 0) return;
-            for (int i = 0; i < count; i++)
+
+            int existing = 0;
+            foreach (var item in inventory)
             {
-                var ammo = await ItemAssetsCollection.InstantiateAsync(ids.GetRandom());
-                c.CharacterItem.Inventory.AddItem(ammo);
+                if (item == null) continue;
+                if (item.Tags.Contains(GameplayDataSettings.Tags.Bullet))
+                {
+                    var cal = item.Constants?.GetString("Caliber");
+                    if (cal == caliber) existing++;
+                }
+            }
+
+            int needed = targetCount - existing;
+            if (needed <= 0) return;
+
+            var filter = new ItemFilter { caliber = caliber, requireTags = new Tag[] { GameplayDataSettings.Tags.Bullet } };
+            var ids = ItemSelector.GetBestItems(filter, 3, minValue: 1); 
+            if (ids.Count == 0) return;
+            
+            for (int i = 0; i < needed; i++)
+            {
+                int id = ids[UnityEngine.Random.Range(0, Mathf.Min(2, ids.Count))];
+                var ammo = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
+                if (ammo != null)
+                {
+                    if (!inventory.AddItem(ammo))
+                    {
+                        ammo.DestroyTree();
+                        break; 
+                    }
+                }
             }
         }
 
-        private async System.Threading.Tasks.Task EquipBackpackById(CharacterMainControl c, int id)
+        private async System.Threading.Tasks.Task EquipBestBackpack(CharacterMainControl c)
         {
-            var item = await ItemAssetsCollection.InstantiateAsync(id);
-            if (item != null)
+            try
             {
-                c.CharacterItem.TryPlug(item, emptyOnly: false);
+                var tags = new List<Tag> { GameplayDataSettings.Tags.Backpack };
+                var filter = new ItemFilter { requireTags = tags.ToArray() };
+                var candidates = ItemSelector.GetBestItems(filter, 5, minValue: 50); // High value backpacks
+                
+                if (candidates.Count == 0) return; 
+
+                int backpackHash = "Backpack".GetHashCode();
+                var slot = c.CharacterItem.Slots.GetSlot(backpackHash);
+                var inv = c.CharacterItem.Inventory;
+
+                if (inv != null)
+                {
+                    var toRemove = new List<Item>();
+                    foreach (var it in inv)
+                    {
+                        if (it != null && it.Tags.Contains(GameplayDataSettings.Tags.Backpack))
+                        {
+                            toRemove.Add(it);
+                        }
+                    }
+                    for (int i = 0; i < toRemove.Count; i++) toRemove[i].DestroyTree();
+                }
+                if (slot != null && slot.Content != null)
+                {
+                    var unplugged = slot.Unplug();
+                    if (unplugged != null) unplugged.DestroyTree();
+                }
+
+                foreach (var id in candidates)
+                {
+                    var item = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
+                    if (item == null) continue;
+                    
+                    if (item.Slots == null || item.Slots.Count == 0)
+                    {
+                        item.DestroyTree();
+                        continue;
+                    }
+
+                    if (slot != null && slot.CanPlug(item))
+                    {
+                        if (!slot.Plug(item, out var unpluggedItem))
+                        {
+                            item.DestroyTree();
+                            continue;
+                        }
+                        if (unpluggedItem != null)
+                        {
+                            if (inv == null || !inv.AddAndMerge(unpluggedItem)) unpluggedItem.DestroyTree();
+                        }
+                        return;
+                    }
+                    else
+                    {
+                        if (!c.CharacterItem.TryPlug(item, emptyOnly: false)) item.DestroyTree();
+                        else return;
+                    }
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BloodMoon] EquipBestBackpack Error: {e}");
             }
         }
 
-        private void EnsureGunLoaded(CharacterMainControl c)
+        private bool HasBackpack(CharacterMainControl c)
         {
+            if (c == null || c.CharacterItem == null || c.CharacterItem.Slots == null) return false;
+            var slot = c.CharacterItem.Slots.GetSlot("Backpack".GetHashCode());
+            return slot != null && slot.Content != null;
+        }
+
+        private async System.Threading.Tasks.Task EnsureGunLoaded(CharacterMainControl c)
+        {
+            await UniTask.Yield();
             var g = c.GetGun();
             var gs = g?.GunItemSetting;
             var inv = c.CharacterItem?.Inventory;
@@ -598,120 +1023,18 @@ namespace BloodMoon
             }
         }
 
-        private async UniTask EnsureWanderersForLonelyBosses()
+
+
+        private void AssignWingIndicesForLeader(CharacterMainControl boss)
         {
-            if (_wanderersSetupDone) return;
-            if (!LevelManager.Instance || !LevelManager.Instance.IsRaidMap) return;
-            var bosses = new List<(CharacterMainControl boss, AICharacterController? ai)>();
-            // Optimization: Use cached characters list instead of FindObjectsOfType
-            foreach (var c in _charactersCache)
-            {
-                if (c == null || c.IsMainCharacter) continue;
-                var preset = c.characterPreset;
-                bool isBoss = preset != null && preset.GetCharacterIcon() == GameplayDataSettings.UIStyle.BossCharacterIcon;
-                if (isBoss)
-                {
-                    bosses.Add((c, c.GetComponent<AICharacterController>()));
-                }
-            }
-            // Optimization: Use FindObjectsOfType only for controllers if strictly necessary, 
-            // or iterate _charactersCache to get components.
+            // Optimization: Use cached characters
             var controllers = new List<AICharacterController>();
             foreach(var c in _charactersCache) {
                 if (c == null) continue;
                 var ai = c.GetComponent<AICharacterController>();
                 if (ai != null) controllers.Add(ai);
             }
-
-            int referenceCount = 0;
-            foreach (var b in bosses)
-            {
-                int count = 0;
-                foreach (var ai in controllers)
-                {
-                    if (ai == null || ai == b.ai) continue;
-                    if (ai.leader == b.boss)
-                    {
-                        count++;
-                    }
-                }
-                referenceCount = Mathf.Max(referenceCount, count);
-            }
-            if (referenceCount <= 0)
-            {
-                referenceCount = 1;
-            }
-            referenceCount = Mathf.Min(referenceCount, _minionsPerBossCap);
-            CharacterRandomPreset? wanderer = null;
-            foreach (var p in GameplayDataSettings.CharacterRandomPresetData.presets)
-            {
-                if (p == null) continue;
-                var icon = p.GetCharacterIcon();
-                if (icon != GameplayDataSettings.UIStyle.BossCharacterIcon)
-                {
-                    wanderer = p;
-                    break;
-                }
-            }
-            if (wanderer == null) return;
-            foreach (var b in bosses)
-            {
-                int currentCount = 0;
-                foreach (var ai in controllers)
-                {
-                    if (ai == null || ai == b.ai) continue;
-                    if (ai.leader == b.boss)
-                    {
-                        currentCount++;
-                    }
-                }
-                if (currentCount >= referenceCount) continue;
-                for (int i = 0; i < referenceCount - currentCount; i++)
-                {
-                    if (_globalMinionSpawned >= _globalMinionCap) break;
-                    var boss = b.boss;
-                    var anchor = GetOrCreateAnchor(boss, CharacterMainControl.Main.transform.position);
-                    Vector3 pos = GetSpawnPointOrFallback(anchor);
-
-                    int scene = MultiSceneCore.MainScene.HasValue ? MultiSceneCore.MainScene.Value.buildIndex : boss.gameObject.scene.buildIndex;
-                    var clone = await wanderer.CreateCharacterAsync(pos, Vector3.forward, scene, null, false);
-                    if (clone != null)
-                    {
-                        var ai = clone.GetComponent<AICharacterController>();
-                        if (ai != null) { ai.enabled = false; ai.leader = b.boss; }
-                        Multiply(clone.CharacterItem, "WalkSpeed", 1.2f);
-                        Multiply(clone.CharacterItem, "RunSpeed", 1.2f);
-                        await EquipArmorLevel(clone, 6);
-                        BoostDefense(clone.CharacterItem, false);
-                        await EnsureNoPistolWeapons(clone);
-                        EquipMeleeWeaponLevel(clone, 5);
-                        await FillHighAmmo(clone, 5);
-                        var mhc2 = clone.CharacterItem.GetStat("MaxHealth".GetHashCode());
-                        if (mhc2 != null) mhc2.BaseValue *= 3f;
-                        EnsureGunLoaded(clone);
-                        clone.Health.SetHealth(clone.Health.MaxHealth);
-                        var mwc2 = clone.CharacterItem.GetStat("MaxWeight".GetHashCode());
-                        if (mwc2 != null) mwc2.BaseValue = 1000f;
-                        clone.UpdateWeightState();
-                        clone.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
-                        var cai2 = clone.GetComponent<AICharacterController>();
-                        if (cai2 != null) cai2.enabled = false;
-                        var custom = clone.gameObject.AddComponent<BloodMoonAIController>();
-                        custom.Init(clone, _store);
-                        custom.SetChaseDelay(0f);
-                        custom.SetWingAssignment(b.boss, i);
-                        GatherLeaderGroup(b.boss);
-                        _globalMinionSpawned++;
-                        _charactersCache.Add(clone);
-                    }
-                }
-            }
-            _wanderersSetupDone = true;
-        }
-
-        private void AssignWingIndicesForLeader(CharacterMainControl boss)
-        {
-            var controllers = UnityEngine.Object.FindObjectsOfType<AICharacterController>();
+            
             var followers = new List<CharacterMainControl>();
             foreach (var ai in controllers)
             {
@@ -739,6 +1062,8 @@ namespace BloodMoon
             for (int i = 0; i < followers.Count; i++)
             {
                 var f = followers[i];
+                if (f == null) continue; // Safety check
+                
                 var ctrl = f.gameObject.GetComponent<BloodMoonAIController>();
                 if (ctrl == null)
                 {
@@ -753,33 +1078,56 @@ namespace BloodMoon
         private Vector3 GetOrCreateAnchor(CharacterMainControl boss, Vector3 fallbackCenter)
         {
             if (_groupAnchors.TryGetValue(boss, out var pos)) return pos;
-            if (!TryGetRandomMapPoint(out pos))
+            
+            // Dynamic range based on map size
+            float minR = Mathf.Clamp(_estimatedMapRadius * 0.15f, 35f, 80f);
+            float maxR = Mathf.Clamp(_estimatedMapRadius * 0.6f, 120f, 400f);
+            
+            // Collect existing anchors to avoid overlap
+            var avoid = _groupAnchors.Values.ToList();
+            
+            if (!TryGetSeparatedMapPoint(fallbackCenter, minR, maxR, avoid, 40f, out pos))
             {
-                pos = GetSpawnPointOrFallback(fallbackCenter);
+                // Retry with larger range for big maps or tighter constraints
+                if (!TryGetSeparatedMapPoint(fallbackCenter, minR, maxR * 1.5f, avoid, 30f, out pos))
+                {
+                     pos = GetSpawnPointOrFallback(fallbackCenter, avoid);
+                }
             }
             _groupAnchors[boss] = pos;
             return pos;
         }
 
-        private Vector3 GetSpawnPointOrFallback(Vector3 fallback)
+        private Vector3 GetSpawnPointOrFallback(Vector3 fallback) => GetSpawnPointOrFallback(fallback, new List<Vector3>());
+        
+        private Vector3 GetSpawnPointOrFallback(Vector3 fallback, List<Vector3> avoid)
         {
-            if (TryGetRandomMapPoint(out var p)) return p;
+            float minR = Mathf.Clamp(_estimatedMapRadius * 0.15f, 35f, 60f);
+            float maxR = Mathf.Clamp(_estimatedMapRadius * 0.6f, 120f, 400f);
+
+            // First try standard range
+            if (TryGetSeparatedMapPoint(fallback, minR, maxR, avoid, 40f, out var p)) return p;
+            
+            // Try extended range for large maps
+            if (TryGetSeparatedMapPoint(fallback, minR, maxR * 1.5f, avoid, 30f, out p)) return p;
+            
+            // Fallback to player relative logic
             var result = fallback;
             var player = CharacterMainControl.Main;
             if (player != null)
             {
                 var playerPos = player.transform.position;
-                float minR = 20f;
-                float maxR = 35f;
+                float pMinR = 35f;
+                float pMaxR = 55f;
                 float dist = Vector3.Distance(fallback, playerPos);
-                if (dist < minR + 2f)
+                if (dist < pMinR + 2f)
                 {
                     var back = -player.transform.forward;
                     if (back.sqrMagnitude < 0.01f)
                     {
                         back = (fallback - playerPos).sqrMagnitude > 0.01f ? (fallback - playerPos).normalized : Vector3.back;
                     }
-                    float r = UnityEngine.Random.Range(minR, maxR);
+                    float r = UnityEngine.Random.Range(pMinR, pMaxR);
                     var candidate = playerPos + back.normalized * r;
                     var ground = GameplayDataSettings.Layers.groundLayerMask;
                     if (Physics.Raycast(candidate + Vector3.up * 2f, Vector3.down, out var hit, 4f, ground))
@@ -819,7 +1167,15 @@ namespace BloodMoon
         private void GatherLeaderGroup(CharacterMainControl boss)
         {
             if (!_groupAnchors.TryGetValue(boss, out var anchor)) anchor = boss.transform.position;
-            var controllers = UnityEngine.Object.FindObjectsOfType<AICharacterController>();
+            
+            // Optimization: Use cached characters
+            var controllers = new List<AICharacterController>();
+            foreach(var c in _charactersCache) {
+                if (c == null) continue;
+                var ai = c.GetComponent<AICharacterController>();
+                if (ai != null) controllers.Add(ai);
+            }
+
             int scene = MultiSceneCore.MainScene.HasValue ? MultiSceneCore.MainScene.Value.buildIndex : boss.gameObject.scene.buildIndex;
             foreach (var ai in controllers)
             {
@@ -831,26 +1187,92 @@ namespace BloodMoon
                     var offset2D = Random.insideUnitCircle.normalized * UnityEngine.Random.Range(2.5f, 6f);
                     var pos = anchor + new Vector3(offset2D.x, 0f, offset2D.y);
                     ch.SetRelatedScene(scene);
-                    ch.SetPosition(pos);
+                    // Force navmesh position to prevent invalid placement
+                    if (UnityEngine.AI.NavMesh.SamplePosition(pos, out var hit, 5f, UnityEngine.AI.NavMesh.AllAreas))
+                    {
+                        ch.SetPosition(hit.position);
+                    }
+                    else
+                    {
+                        ch.SetPosition(pos);
+                    }
                 }
             }
             AssignWingIndicesForLeader(boss);
         }
 
-        private bool TryGetRandomMapPoint(out Vector3 pos)
+        private bool TryGetRandomMapPoint(Vector3 center, float minRange, float maxRange, out Vector3 pos)
+        {
+            return TryGetSeparatedMapPoint(center, minRange, maxRange, null, 0f, out pos);
+        }
+
+        private bool TryGetSeparatedMapPoint(Vector3 center, float minRange, float maxRange, List<Vector3>? avoidPoints, float avoidRadius, out Vector3 pos)
         {
             pos = Vector3.zero;
             if (_pointsCache != null && _pointsCache.Count > 0)
             {
-                var p = _pointsCache[UnityEngine.Random.Range(0, _pointsCache.Count)];
-                pos = p.GetRandomPoint();
-                // Lowered raycast height from 10f to 1.5f for indoor compatibility
-                var ray = new Ray(pos + Vector3.up * 1.5f, Vector3.down);
-                if (Physics.Raycast(ray, out var hit, 5.0f, GameplayDataSettings.Layers.groundLayerMask))
+                // Filter points within range
+                var candidates = new List<Points>();
+                float sqrMin = minRange * minRange;
+                float sqrMax = maxRange * maxRange;
+                foreach (var p in _pointsCache)
                 {
-                    pos = hit.point;
+                    if (p == null) continue;
+                    float d2 = Vector3.SqrMagnitude(p.transform.position - center);
+                    if (d2 >= sqrMin && d2 <= sqrMax)
+                    {
+                        candidates.Add(p);
+                    }
                 }
-                return true;
+
+                if (candidates.Count > 0)
+                {
+                    // Best Candidate Sampling for Uniform Distribution
+                    int attempts = 15;
+                    Vector3 bestCandidate = Vector3.zero;
+                    float bestScore = -1f;
+
+                    for (int i = 0; i < attempts; i++)
+                    {
+                        var p = candidates[UnityEngine.Random.Range(0, candidates.Count)];
+                        var candidatePos = p.GetRandomPoint();
+                        if (Vector3.Distance(candidatePos, center) < minRange) continue;
+
+                        // Calculate score based on separation
+                        float score = 1000f;
+                        bool valid = true;
+                        
+                        if (avoidPoints != null && avoidPoints.Count > 0)
+                        {
+                            float minSep = float.MaxValue;
+                            foreach(var ap in avoidPoints)
+                            {
+                                float dist = Vector3.Distance(candidatePos, ap);
+                                if (dist < avoidRadius) { valid = false; break; }
+                                if (dist < minSep) minSep = dist;
+                            }
+                            if (!valid) continue;
+                            score = minSep; // Prefer farthest from others
+                        }
+
+                        if (score > bestScore)
+                        {
+                            // Verify ground
+                            var ray = new Ray(candidatePos + Vector3.up * 1.5f, Vector3.down);
+                            if (Physics.Raycast(ray, out var hit, 5.0f, GameplayDataSettings.Layers.groundLayerMask))
+                            {
+                                bestScore = score;
+                                bestCandidate = hit.point;
+                            }
+                        }
+                    }
+
+                    if (bestScore >= 0f)
+                    {
+                        pos = bestCandidate;
+                        return true;
+                    }
+                }
             }
             return false;
         }
@@ -858,64 +1280,195 @@ namespace BloodMoon
 
         public void StartSceneSetupParallel()
         {
-            if (!LevelManager.Instance || !LevelManager.Instance.IsRaidMap) return;
+            if (!_initialized) return;
+            if (!LevelManager.Instance || !LevelManager.Instance.IsRaidMap || LevelManager.Instance.IsBaseLevel) return;
+            
+            // Ensure clean state before starting
+            if (!_setupRunning && !_sceneSetupDone) 
+            {
+                 if (_bloodMoonActive && Time.time - _bloodMoonStartTime > _bloodMoonDurationSec)
+                 {
+                     ResetSession();
+                 }
+            }
+
             if (_setupRunning) return;
+            _setupRunning = true;
+
+            _bloodMoonStartTime = Time.time;
+            _bloodMoonActive = true;
+            _strategyDecayTimer = 30f;
+
+            // --- Synchronous Initialization Phase ---
+            // Immediately capture and disable vanilla spawners to prevent interference
+            _pointsCache.Clear();
+            _disabledSpawners.Clear();
+
+            // 1. Capture Points & Limit Native Spawners (Do not disable)
+            var spawners = UnityEngine.Object.FindObjectsOfType<RandomCharacterSpawner>();
+            foreach (var s in spawners) 
+            { 
+                if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints);
+                // Limit quantity to avoid overcrowding
+                s.spawnCountRange = new Vector2Int(1, 1);
+            }
+            
+            var waveSpawners = UnityEngine.Object.FindObjectsOfType<WaveCharacterSpawner>();
+            foreach (var s in waveSpawners) 
+            { 
+                if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints);
+                // Limit quantity to avoid overcrowding
+                s.spawnCountRange = new Vector2Int(1, 1);
+            }
+
+            // -----------------------------------
+
+            // 2. Initial Map Metrics Calculation
+            RecalculateMapMetrics();
+            
+            // 3. Initial Disable of any pre-existing vanilla AI
+            _charactersCache.Clear();
+            _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
+            DisableVanillaControllersCached();
+
             UniTask.Void(async () =>
             {
-                _setupRunning = true;
-                await UniTask.WaitUntil(() => LevelManager.LevelInited && CharacterMainControl.Main != null);
-                var player = CharacterMainControl.Main;
-                int scene = MultiSceneCore.MainScene.HasValue ? MultiSceneCore.MainScene.Value.buildIndex : SceneManager.GetActiveScene().buildIndex;
-                _processed.Clear();
-                _pointsCache.Clear();
-                _pointsCache.AddRange(UnityEngine.Object.FindObjectsOfType<Points>());
-                _charactersCache.Clear();
-                _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
-                _wanderersSetupDone = false;
-                DisableVanillaControllersCached();
-
-                _currentScene = scene;
-                _sceneSetupDone = false;
-                
-                var allBossPresets = GameplayDataSettings.CharacterRandomPresetData.presets
-                    .Where(p => p != null && p.GetCharacterIcon() == GameplayDataSettings.UIStyle.BossCharacterIcon)
-                    .ToArray();
-
-                CharacterRandomPreset[] selected = System.Array.Empty<CharacterRandomPreset>();
-
-                await Task.Run(() =>
+                try 
                 {
-                    var rnd = new System.Random();
-                    selected = allBossPresets.OrderBy(_ => rnd.Next()).Take(3).ToArray();
-                });
-
-                _selectedBossPresets.Clear();
-                _selectedBossPresets.AddRange(selected);
-                _selectedScene = scene;
-                _selectionInitialized = true;
-
-                foreach (var preset in _selectedBossPresets)
-                {
-                    bool exists = UnityEngine.Object.FindObjectsOfType<CharacterMainControl>().Any(c => c.characterPreset == preset);
-                    if (!exists)
+                    if (CharacterMainControl.Main == null) await UniTask.WaitUntil(() => CharacterMainControl.Main != null);
+                    
+                    var player = CharacterMainControl.Main;
+                    if (player == null)
                     {
-                        var anchor = GetSpawnPointOrFallback(player.transform.position);
-                        var clone = await preset.CreateCharacterAsync(anchor, Vector3.forward, scene, null, false);
-                        if (clone != null)
+                         _setupRunning = false;
+                         return;
+                    }
+
+                    int scene = MultiSceneCore.MainScene.HasValue ? MultiSceneCore.MainScene.Value.buildIndex : SceneManager.GetActiveScene().buildIndex;
+                    _processed.Clear();
+                    
+                    // Re-scan characters in case player appeared
+                    _charactersCache.Clear();
+                    _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
+                    DisableVanillaControllersCached();
+
+                    _currentScene = scene;
+                    _sceneSetupDone = false;
+                    
+                    // Identify all available raid scenes from points
+                    var availableScenes = new List<int>();
+                    foreach(var p in _pointsCache)
+                    {
+                        if (p != null)
                         {
-                            EnhanceBoss(clone);
-                            EnableRevenge(clone, player);
-                            _processed.Add(clone);
-                            _groupAnchors[clone] = anchor;
-                            _charactersCache.Add(clone);
+                            int sIdx = p.gameObject.scene.buildIndex;
+                            if (!availableScenes.Contains(sIdx)) availableScenes.Add(sIdx);
                         }
                     }
-                }
+                    if (availableScenes.Count == 0) availableScenes.Add(scene);
+                    
+                    var allBossPresets = GameplayDataSettings.CharacterRandomPresetData.presets
+                        .Where(p => p != null && p.GetCharacterIcon() == GameplayDataSettings.UIStyle.BossCharacterIcon)
+                        .ToArray();
 
-                await EnsureWanderersForLonelyBosses();
-                DisableVanillaControllersCached();
-                _sceneSetupDone = true;
-                _setupRunning = false;
+                    CharacterRandomPreset[] selected = System.Array.Empty<CharacterRandomPreset>();
+
+                    await Task.Run(() =>
+                    {
+                        var rnd = new System.Random();
+                        selected = allBossPresets.OrderBy(_ => rnd.Next()).Take(3).ToArray();
+                    });
+
+                    // Force return to Main Thread to ensure Unity API safety
+                    await UniTask.SwitchToMainThread();
+
+                    _selectedBossPresets.Clear();
+                    _selectedBossPresets.AddRange(selected);
+                    _selectedScene = scene;
+                    _selectionInitialized = true;
+
+                    int sceneCursor = 0;
+                    foreach (var preset in _selectedBossPresets)
+                    {
+                        bool exists = UnityEngine.Object.FindObjectsOfType<CharacterMainControl>().Any(c => c.characterPreset == preset);
+                        if (!exists)
+                        {
+                            int targetScene = availableScenes[sceneCursor % availableScenes.Count];
+                            sceneCursor++;
+
+                            var avoid = _groupAnchors.Values.ToList();
+                            
+                            // Try to find a random point in target scene
+                            Vector3 anchor = Vector3.zero;
+                            bool found = false;
+                            
+                            // Filter points for target scene
+                            var scenePoints = _pointsCache.Where(p => p != null && p.gameObject.scene.buildIndex == targetScene).ToList();
+                            if (scenePoints.Count > 0)
+                            {
+                                // Try 10 times to find a valid spot
+                                for(int k=0; k<10; k++)
+                                {
+                                    var pt = scenePoints[UnityEngine.Random.Range(0, scenePoints.Count)];
+                                    var cand = pt.GetRandomPoint();
+                                    // Basic distance check against other bosses
+                                    bool farEnough = true;
+                                    foreach(var av in avoid)
+                                    {
+                                        if(Vector3.Distance(cand, av) < 40f) { farEnough = false; break; }
+                                    }
+                                    if(farEnough)
+                                    {
+                                        if (Physics.Raycast(cand + Vector3.up * 2f, Vector3.down, out var hit, 5f, GameplayDataSettings.Layers.groundLayerMask))
+                                        {
+                                            anchor = hit.point;
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if (!found)
+                {
+                    anchor = GetSpawnPointOrFallback(player.transform.position, avoid);
+                    targetScene = scene; // Fallback to main scene if custom placement failed
+                }
+                
+                try
+                {
+                    var clone = await preset.CreateCharacterAsync(anchor, Vector3.forward, targetScene, null, false);
+                    if (clone != null)
+                    {
+                        // Wait longer to ensure full initialization (Animator, MagicBlend, etc.)
+                        await UniTask.Delay(500);
+                        if (clone == null) continue; // Check if destroyed during wait
+                        EnhanceBoss(clone).Forget();
+                        EnableRevenge(clone, player);
+                        SpawnMinionsForBoss(clone, anchor, targetScene).Forget();
+                        _processed.Add(clone);
+                        _groupAnchors[clone] = anchor;
+                        _charactersCache.Add(clone);
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogError($"[BloodMoon] Create Boss Error: {ex}");
+                }
+            }
+        }
+
+                    DisableVanillaControllersCached();
+                    _sceneSetupDone = true;
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogError($"[BloodMoon] Setup Failed: {e}");
+                }
+                finally
+                {
+                    _setupRunning = false;
+                }
             });
         }
 

@@ -45,22 +45,16 @@ namespace BloodMoon
             public List<Vector3> playerAmbushSpots = new List<Vector3>();
             public List<Vector3> stuckSpots = new List<Vector3>();
             public Vector3 lastKnownPlayerPos;
-            public float lastSeenTime;
             public int reloadCount;
-            public float lastReloadMark;
             public int deathCount;
-            public float lastDeathTime;
 
             public void FromStore(AIDataStore s)
             {
                 playerAmbushSpots = s.PlayerAmbushSpots;
                 stuckSpots = s.StuckSpots;
                 lastKnownPlayerPos = s.LastKnownPlayerPos;
-                lastSeenTime = s.LastSeenTime;
                 reloadCount = s._reloadCount;
-                lastReloadMark = s._lastReloadMark;
                 deathCount = s.DeathCount;
-                lastDeathTime = s.LastDeathTime;
             }
 
             public void ToStore(AIDataStore s)
@@ -68,11 +62,8 @@ namespace BloodMoon
                 if (playerAmbushSpots != null) s.PlayerAmbushSpots = playerAmbushSpots;
                 if (stuckSpots != null) s.StuckSpots = stuckSpots;
                 s.LastKnownPlayerPos = lastKnownPlayerPos;
-                s.LastSeenTime = lastSeenTime;
                 s._reloadCount = reloadCount;
-                s._lastReloadMark = lastReloadMark;
                 s.DeathCount = deathCount;
-                s.LastDeathTime = lastDeathTime;
             }
         }
 
@@ -249,7 +240,8 @@ namespace BloodMoon
         private string GetSaveDirectory()
         {
             // Use BepInEx config path or UserData path if available, otherwise relative to executable
-            string path = Path.Combine(Directory.GetCurrentDirectory(), "UserData", FolderName);
+            string root = Directory.GetParent(Application.dataPath).FullName;
+            string path = Path.Combine(root, "UserData", FolderName);
             if (!Directory.Exists(path))
             {
                 Directory.CreateDirectory(path);
@@ -514,27 +506,32 @@ namespace BloodMoon
         }
 
         // Runtime Engagement Tracking (Not serialized)
-        private Dictionary<CharacterMainControl, List<CharacterMainControl>> _engagements = new Dictionary<CharacterMainControl, List<CharacterMainControl>>();
+        private Dictionary<int, List<CharacterMainControl>> _engagements = new Dictionary<int, List<CharacterMainControl>>();
 
         public void RegisterEngagement(CharacterMainControl target, CharacterMainControl attacker)
         {
             if (target == null || attacker == null) return;
-            if (!_engagements.ContainsKey(target)) _engagements[target] = new List<CharacterMainControl>();
+            int id = target.GetInstanceID();
+            if (!_engagements.ContainsKey(id)) _engagements[id] = new List<CharacterMainControl>();
             
-            var list = _engagements[target];
+            var list = _engagements[id];
             if (!list.Contains(attacker)) list.Add(attacker);
         }
 
         public void UnregisterEngagement(CharacterMainControl target, CharacterMainControl attacker)
         {
-            if (target == null || !_engagements.ContainsKey(target)) return;
-            _engagements[target].Remove(attacker);
+            if (target == null) return;
+            int id = target.GetInstanceID();
+            if (!_engagements.ContainsKey(id)) return;
+            _engagements[id].Remove(attacker);
         }
 
         public int GetEngagementCount(CharacterMainControl target)
         {
-            if (target == null || !_engagements.ContainsKey(target)) return 0;
-            var list = _engagements[target];
+            if (target == null) return 0;
+            int id = target.GetInstanceID();
+            if (!_engagements.ContainsKey(id)) return 0;
+            var list = _engagements[id];
             // Lazy cleanup
             for (int i = list.Count - 1; i >= 0; i--)
             {

@@ -12,6 +12,8 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 
+using HarmonyLib;
+
 namespace BloodMoon
 {
     public class ModBehaviour : Duckov.Modding.ModBehaviour
@@ -21,6 +23,7 @@ namespace BloodMoon
         private RedOverlay _overlay = null!;
         private BossManager _bossManager = null!;
         private AIDataStore _dataStore = null!;
+        private Harmony _harmony = null!;
 
         private void Awake()
         {
@@ -31,12 +34,25 @@ namespace BloodMoon
             _bossManager = new BossManager(_dataStore);
             _ui = new BloodMoonUI(_event);
             SavesSystem.OnCollectSaveData += Save;
+            
+            _harmony = new Harmony("com.bloodmoon.patch");
+            _harmony.PatchAll();
+            Patches.ManualPatch(_harmony);
+        }
+
+        private void Start()
+        {
+            // Force load config on main thread to avoid threading issues with Application.dataPath
+            var config = BloodMoon.Utils.ModConfig.Instance;
             Load();
+            _bossManager.Initialize();
         }
 
         private void OnDestroy()
         {
+            _harmony?.UnpatchAll("com.bloodmoon.patch");
             SavesSystem.OnCollectSaveData -= Save;
+            _bossManager?.Dispose();
             _overlay?.Dispose();
             _ui?.Dispose();
         }
@@ -70,7 +86,14 @@ namespace BloodMoon
 
         private void OnLevelInitialized()
         {
+            // Reload config on every level start to support hot-swapping values
+            BloodMoon.Utils.ModConfig.Load();
+
             _ui.AttachToTimeOfDayDisplay();
+            
+            // Safety check for base level
+            if (LevelManager.Instance != null && LevelManager.Instance.IsBaseLevel) return;
+
             var now = GameClock.Now;
             if (_event.IsActive(now) && LevelManager.Instance != null && LevelManager.Instance.IsRaidMap)
             {
@@ -83,16 +106,27 @@ namespace BloodMoon
             var now = GameClock.Now;
             bool active = _event.IsActive(now);
             _ui.Refresh(now);
-            if (active && LevelManager.Instance != null && LevelManager.Instance.IsRaidMap)
+            
+            // Disable Boss logic in Base Level, but keep UI updating
+            if (LevelManager.Instance != null && LevelManager.Instance.IsBaseLevel)
+            {
+                _overlay.Hide();
+            }
+            else if (active && LevelManager.Instance != null && LevelManager.Instance.IsRaidMap)
             {
                 _overlay.Show();
-                _overlay.Tick(Time.deltaTime);
-                _bossManager.TickBloodMoon();
+                _bossManager.Tick();
             }
             else
             {
                 _overlay.Hide();
             }
+        }
+
+        private void LateUpdate()
+        {
+            // Process atmosphere visual overrides after game logic
+            _overlay?.Tick(Time.deltaTime);
         }
     }
 }

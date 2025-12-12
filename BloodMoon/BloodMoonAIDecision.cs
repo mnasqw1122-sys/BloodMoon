@@ -1,6 +1,7 @@
 using UnityEngine;
 using Duckov;
 using Duckov.Utilities;
+using Duckov.ItemUsage;
 using System.Collections.Generic;
 
 namespace BloodMoon
@@ -28,6 +29,13 @@ namespace BloodMoon
         public bool IsStuck;
         public bool CanChase;
         
+        // Target State
+        public bool TargetIsReloading;
+        public bool TargetIsHealing;
+
+        public bool IsBoss => Controller != null && Controller.IsBoss;
+        public bool IsRaged => Controller != null && Controller.IsRaged;
+
         public void UpdateSensors()
         {
             if (Character == null || CharacterMainControl.Main == null) return;
@@ -65,6 +73,11 @@ namespace BloodMoon
             IsLowAmmo = gun != null && gun.BulletCount < (gun.Capacity * 0.2f);
             IsReloading = gun != null && gun.IsReloading();
             
+            // Check Target State
+            var tGun = Target.GetGun();
+            TargetIsReloading = tGun != null && tGun.IsReloading();
+            TargetIsHealing = Target.CurrentHoldItemAgent != null && Target.CurrentHoldItemAgent.Item.GetComponent<Drug>() != null; // Simplified check
+
             // Check State
             if (Controller != null)
             {
@@ -97,25 +110,114 @@ namespace BloodMoon
 
     // --- Concrete Actions ---
 
+    public class Action_BossCommand : AIAction
+    {
+        public Action_BossCommand() { Name = "BossCommand"; }
+        public override float Evaluate(AIContext ctx)
+        {
+            if (!ctx.IsBoss || IsCoolingDown()) return 0f;
+            
+            // Trigger if we have allies nearby (Controller handles check)
+            // Or just periodically if in combat
+            if (ctx.HasLoS || ctx.Pressure > 1f)
+            {
+                return 0.65f;
+            }
+            return 0f;
+        }
+        public override void Execute(AIContext ctx)
+        {
+            if (ctx.Controller != null && ctx.Controller.PerformBossCommand())
+            {
+                _cooldown = 20f;
+            }
+            else
+            {
+                _cooldown = 5f; // Retry sooner if failed (no allies)
+            }
+        }
+    }
+
     public class Action_Heal : AIAction
     {
         public Action_Heal() { Name = "Heal"; }
         public override float Evaluate(AIContext ctx)
         {
-            if (ctx.Character == null) return 0f;
+            if (ctx.Character == null || ctx.Controller == null) return 0f;
+            
+            // If already committed to healing, keep going unless critical
+            if (ctx.Controller.IsHealing) return 0.95f;
+
+            // Optimization: Early exit if no meds
+            if (!ctx.Controller.HasHealingItem()) return 0f;
+
             float healthPct = ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth;
             
-            // Critical heal: Very low HP
-            if (healthPct < 0.3f) return 0.95f;
+            // Dynamic Logic: Score increases as health drops
+            // Curve: (1 - HP)^1.5
+            // 90% HP -> 0.03
+            // 50% HP -> 0.35
+            // 20% HP -> 0.71
+            // 10% HP -> 0.85
+            float urgency = Mathf.Pow(1.0f - healthPct, 1.5f);
             
-            // Tactical heal: Medium HP and safe
-            if (healthPct < 0.6f && (!ctx.HasLoS || ctx.Pressure < 0.5f)) return 0.75f;
+            // Modifiers
             
-            return 0f;
+            // 1. Safety Bonus: If hidden, take opportunity to heal
+            if (!ctx.HasLoS) urgency += 0.25f;
+            
+            // 2. Pressure Penalty: If under fire, prioritize fighting/retreating unless desperate
+            // Bosses are less affected by pressure
+            float pressurePenalty = ctx.Controller.IsBoss ? 0.05f : 0.15f;
+            if (ctx.Pressure > 1.5f) urgency -= pressurePenalty;
+            
+            // 3. Personality Variation (Randomness)
+            // Use ID to create a fixed random offset for this agent
+            float personality = (ctx.Character.GetInstanceID() % 100) / 500.0f; // 0.0 to 0.2
+            urgency += personality; 
+
+            return Mathf.Clamp01(urgency);
         }
         public override void Execute(AIContext ctx)
         {
             ctx.Controller?.PerformHeal();
+        }
+    }
+
+    public class Action_Rush : AIAction
+    {
+        public Action_Rush() { Name = "Rush"; }
+        public override float Evaluate(AIContext ctx)
+        {
+            if (ctx.Target == null || ctx.Character == null) return 0f;
+            
+            // Only rush if target is vulnerable
+            if (ctx.TargetIsReloading || ctx.TargetIsHealing)
+            {
+                // And we are relatively close
+                if (ctx.DistToTarget < 20f && ctx.HasLoS)
+                {
+                    // Bosses love to punish
+                    if (ctx.IsBoss) 
+                    {
+                         if (ctx.IsRaged) return 0.98f; // Raged boss almost always rushes vulnerable target
+                         return 0.9f;
+                    }
+                    return 0.75f;
+                }
+            }
+            
+            // Rage Mode Rush (even if target not vulnerable)
+            if (ctx.IsRaged && ctx.HasLoS && ctx.DistToTarget < 15f)
+            {
+                return 0.85f;
+            }
+
+            return 0f;
+        }
+        public override void Execute(AIContext ctx)
+        {
+            ctx.Controller?.PerformRush();
         }
     }
 
@@ -158,8 +260,11 @@ namespace BloodMoon
             
             if (!ctx.Controller.HasGrenade()) return 0f;
             
+            // If target has been stationary (camping) or we have lost LoS recently but know position
+            bool isCamping = Vector3.Distance(ctx.Target.transform.position, ctx.LastKnownPos) < 2.0f && (Time.time - ctx.LastSeenTime < 5f);
+            
             // If high pressure or target is hiding, boost score
-            if (!ctx.HasLoS || ctx.Pressure > 2f) return 0.82f;
+            if ((!ctx.HasLoS || isCamping) && ctx.Pressure > 1f) return 0.82f;
             
             return 0.4f;
         }
@@ -185,6 +290,13 @@ namespace BloodMoon
             if (ctx.Character == null) return 0f;
             float hp = ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth;
             
+            // Bosses don't retreat easily
+            if (ctx.Controller != null && ctx.Controller.IsBoss)
+            {
+                if (hp < 0.15f) return 0.5f; // Only when critical
+                return 0f;
+            }
+
             // If dying and under pressure
             if (hp < 0.3f && ctx.Pressure > 2.0f) return 0.95f;
             
@@ -240,6 +352,13 @@ namespace BloodMoon
             {
                 // If we are relatively safe
                 if (ctx.Pressure < 2f) return 0.6f;
+                
+                // SQUAD TACTIC: Support flanking allies
+                if (ctx.Store != null && ctx.Target != null)
+                {
+                    // If others are flanking (no direct API yet, but if engagement is high)
+                    if (ctx.Store.GetEngagementCount(ctx.Target) > 1) return 0.75f;
+                }
             }
             return 0f;
         }
@@ -262,6 +381,10 @@ namespace BloodMoon
                 if (ctx.Pressure < 1.0f) score += 0.2f;
                 // Bonus if target is close
                 if (ctx.DistToTarget < 15f) score += 0.1f;
+                
+                // Bosses are more aggressive
+                if (ctx.Controller != null && ctx.Controller.IsBoss) score += 0.15f;
+                
                 return score;
             }
             return 0f;
@@ -307,6 +430,25 @@ namespace BloodMoon
         }
     }
 
+    public class Action_Patrol : AIAction
+    {
+        public Action_Patrol() { Name = "Patrol"; }
+        public override float Evaluate(AIContext ctx)
+        {
+            // If we have nothing better to do (no target, not stuck)
+            if (ctx.Target == null && !ctx.IsStuck)
+            {
+                // Patrol is the default state
+                return 0.2f;
+            }
+            return 0f;
+        }
+        public override void Execute(AIContext ctx)
+        {
+            ctx.Controller?.PerformPatrol();
+        }
+    }
+
     public class Action_Search : AIAction
     {
         public Action_Search() { Name = "Search"; }
@@ -340,7 +482,9 @@ namespace BloodMoon
             if (ctx.Store != null && ctx.Target != null)
             {
                 int engaging = ctx.Store.GetEngagementCount(ctx.Target);
-                if (engaging > 2) return 0.7f; // High priority to flank if crowded
+                // Dynamic threshold based on boss presence
+                int threshold = (ctx.Controller != null && ctx.Controller.IsBoss) ? 3 : 2;
+                if (engaging > threshold) return 0.85f; // Increased priority to force flanking when crowded
             }
 
             // If no LoS but we know where they are, maybe flank instead of chase?
@@ -354,13 +498,8 @@ namespace BloodMoon
         public override void Execute(AIContext ctx)
         {
             if (ctx.Character == null) return;
-            // Simple flank: Move 45 degrees to the side of the target direction
-            var dir = ctx.DirToTarget;
-            // Randomize flank direction
-            float angle = (ctx.Character.GetInstanceID() % 2 == 0) ? 45f : -45f;
-            var flankDir = Quaternion.AngleAxis(angle, Vector3.up) * dir;
-            var target = ctx.Character.transform.position + flankDir * 10f;
-            ctx.Controller?.MoveTo(target);
+            // Use tactical flank logic in controller
+            ctx.Controller?.PerformTacticalFlank();
         }
     }
 

@@ -1,79 +1,125 @@
 using UnityEngine;
-using UnityEngine.UI;
 
 namespace BloodMoon
 {
     public class RedOverlay
     {
-        private Image? _img;
-        private Color _target = new Color(1f, 0.12f, 0.12f, 0.18f);
-        private float _fadeSpeed = 2.0f;
-        private HUDManager? _cachedHud;
+        private bool _isActive;
+        private float _transitionProgress; // 0 to 1
+        private const float TRANSITION_SPEED = 0.5f;
+        
+        // Original Settings Backup
+        private Color _origFogColor;
+        private float _origFogDensity;
+        private FogMode _origFogMode;
+        private bool _origFogEnabled;
+        private Color _origAmbient;
+        
+        // Target Settings
+        // Deep crimson red
+        private Color _targetFogColor = new Color(0.6f, 0.02f, 0.02f, 1f); 
+        // Thick enough to obscure vision beyond ~40-50m
+        private float _targetDensity = 0.025f; 
+        
+        private bool _captured;
 
         public void Show()
         {
-            if (_img == null)
+            if (!_isActive)
             {
-                if (_cachedHud == null) _cachedHud = Object.FindObjectOfType<HUDManager>();
-                if (_cachedHud == null) return;
-                var hud = _cachedHud;
-                var exist = hud.transform.Find("BloodMoonOverlay");
-                GameObject go;
-                if (exist != null)
-                {
-                    go = exist.gameObject;
-                    _img = go.GetComponent<Image>();
-                    if (_img == null) _img = go.AddComponent<Image>();
-                }
-                else
-                {
-                    go = new GameObject("BloodMoonOverlay", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
-                    go.transform.SetParent(hud.transform, false);
-                    _img = go.GetComponent<Image>();
-                }
-                go.transform.SetSiblingIndex(0);
-                var rt = (RectTransform)go.transform;
-                rt.anchorMin = Vector2.zero;
-                rt.anchorMax = Vector2.one;
-                rt.offsetMin = Vector2.zero;
-                rt.offsetMax = Vector2.zero;
-                _img.color = new Color(_target.r, _target.g, _target.b, 0f);
-                _img.raycastTarget = false;
+                if (!_captured) CaptureOriginals();
+                _isActive = true;
             }
-            if (!_img.gameObject.activeSelf) _img.gameObject.SetActive(true);
         }
 
         public void Hide()
         {
-            if (_img != null) _img.gameObject.SetActive(false);
+            if (_isActive)
+            {
+                _isActive = false;
+                // Transition will handle the rest in Tick
+            }
         }
 
-        public void Dispose()
+        private void CaptureOriginals()
         {
-            if (_img != null) Object.Destroy(_img.gameObject);
+            _origFogEnabled = RenderSettings.fog;
+            _origFogColor = RenderSettings.fogColor;
+            _origFogDensity = RenderSettings.fogDensity;
+            _origFogMode = RenderSettings.fogMode;
+            _origAmbient = RenderSettings.ambientLight;
+            _captured = true;
         }
 
         public void Tick(float dt)
         {
-            if (_img == null) return;
-            var cur = _img.color;
-            
-            // Optimization: Stop updating if color is already close to target
-            // This prevents unnecessary Canvas rebuilds once the fade is complete
-            if (Mathf.Abs(cur.a - _target.a) < 0.002f && 
-                Mathf.Abs(cur.r - _target.r) < 0.002f &&
-                Mathf.Abs(cur.g - _target.g) < 0.002f)
+            // Calculate Transition
+            if (_isActive)
             {
-                 return;
+                _transitionProgress = Mathf.MoveTowards(_transitionProgress, 1f, dt * TRANSITION_SPEED);
+            }
+            else
+            {
+                _transitionProgress = Mathf.MoveTowards(_transitionProgress, 0f, dt * TRANSITION_SPEED);
             }
 
-            float t = Mathf.Clamp01(dt * _fadeSpeed);
-            _img.color = new Color(Mathf.Lerp(cur.r, _target.r, t), Mathf.Lerp(cur.g, _target.g, t), Mathf.Lerp(cur.b, _target.b, t), Mathf.Lerp(cur.a, _target.a, t));
+            if (_transitionProgress <= 0f)
+            {
+                if (_captured)
+                {
+                    // Restore exact originals when fully faded out
+                    RestoreOriginals();
+                }
+                return;
+            }
+
+            // If we haven't captured yet (safety)
+            if (!_captured) CaptureOriginals();
+
+            // Apply Effect
+            ApplyBloodMoonAtmosphere();
         }
 
-        public void SetTarget(Color c)
+        private void ApplyBloodMoonAtmosphere()
         {
-            _target = c;
+            RenderSettings.fog = true;
+            // Force Exp2 for best volumetric feel
+            RenderSettings.fogMode = FogMode.ExponentialSquared; 
+
+            // Pulse effect for "breathing" atmosphere
+            float pulse = Mathf.Sin(Time.time * 1.2f) * 0.15f + 1.0f; // 0.85 to 1.15
+            
+            float t = _transitionProgress;
+            
+            // Color Gradient: Start normal, fade to Red
+            Color bloodColor = _targetFogColor * pulse;
+            // Clamp brightness to avoid neon fog
+            bloodColor.r = Mathf.Clamp01(bloodColor.r); 
+            
+            RenderSettings.fogColor = Color.Lerp(_origFogColor, bloodColor, t);
+            
+            // Density
+            float bloodDensity = _targetDensity * (pulse * 0.8f + 0.4f); // Vary density slightly
+            RenderSettings.fogDensity = Mathf.Lerp(_origFogDensity, bloodDensity, t);
+            
+            // Ambient Light: Darken the world to make the fog glow more prominent
+            Color bloodAmbient = new Color(0.25f, 0.05f, 0.05f);
+            RenderSettings.ambientLight = Color.Lerp(_origAmbient, bloodAmbient, t);
+        }
+
+        private void RestoreOriginals()
+        {
+            RenderSettings.fog = _origFogEnabled;
+            RenderSettings.fogColor = _origFogColor;
+            RenderSettings.fogDensity = _origFogDensity;
+            RenderSettings.fogMode = _origFogMode;
+            RenderSettings.ambientLight = _origAmbient;
+            _captured = false;
+        }
+
+        public void Dispose()
+        {
+            if (_captured) RestoreOriginals();
         }
     }
 }

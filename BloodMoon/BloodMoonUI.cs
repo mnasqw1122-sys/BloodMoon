@@ -3,6 +3,7 @@ using TMPro;
 using UnityEngine;
 using Duckov.Weathers;
 using Duckov.Utilities;
+using BloodMoon.Utils;
 
 namespace BloodMoon
 {
@@ -22,7 +23,7 @@ namespace BloodMoon
             if (tod == null) return;
             if (_title != null) UnityEngine.Object.Destroy(_title.gameObject);
             _title = UnityEngine.Object.Instantiate(GameplayDataSettings.UIStyle.TemplateTextUGUI);
-            _title.text = "血月来临时间 000:00";
+            _title.text = string.Format(Localization.Get("UI_Format"), Localization.Get("Event_Incoming"), "000:00");
             var parent = tod.stormText.transform.parent;
             _title.transform.SetParent(parent);
             _title.transform.localScale = Vector3.one;
@@ -38,10 +39,10 @@ namespace BloodMoon
             var eta = _event.GetETA(now);
             var active = _event.IsActive(now);
             var remain = active ? _event.GetOverETA(now) : eta;
-            var label = active ? "血月持续时间" : "血月来临时间";
+            var label = active ? Localization.Get("Event_Active") : Localization.Get("Event_Incoming");
             var timeStr = $"{Mathf.FloorToInt((float)remain.TotalHours):000}:{remain.Minutes:00}";
             
-            var fullStr = $"{label} {timeStr}";
+            var fullStr = string.Format(Localization.Get("UI_Format"), label, timeStr);
             if (fullStr != _lastTimeStr)
             {
                 _title.text = fullStr;
