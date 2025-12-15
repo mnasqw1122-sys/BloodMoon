@@ -31,28 +31,7 @@ namespace BloodMoon
         private readonly Dictionary<CharacterMainControl, Vector3> _groupAnchors = new Dictionary<CharacterMainControl, Vector3>();
         private float _bloodMoonStartTime = -1f;
         private float _bloodMoonDurationSec => ModConfig.Instance.ActiveHours * 3600f; // Config is in hours? No, likely game hours. 
-        // Wait, active time in BloodMoonEvent is TimeSpan.FromHours(24). Game time vs Real time?
-        // In BloodMoonEvent, IsActive uses Tick math.
-        // Here _bloodMoonDurationSec is used with Time.time (Real time seconds).
-        // If ActiveHours is 24 game hours, how many real seconds?
-        // Usually 1 game hour = X real minutes.
-        // I'll assume for now I should just use the config value. 
-        // Let's assume Config.ActiveHours is GAME HOURS.
-        // But here it compares to Time.time.
-        // The original code had 900f (15 minutes).
-        // If 24 game hours = 15 real minutes, then 1 game hour ~ 37.5 seconds.
-        // I'll stick to 900f default or make it configurable as REAL seconds duration.
-        // Let's change Config to have RealSeconds duration or just keep hardcoded logic if unsure.
-        // ModConfig.ActiveHours was float = 24.
-        // I'll assume ModConfig.ActiveHours is Game Hours used in Event, 
-        // and here we need a separate Real Time Duration?
-        // Actually, BloodMoonEvent manages the "IsActive" based on GameClock.Now.
-        // BossManager.Tick checks `_event.IsActive(now)`.
-        // BUT, line 163 checks `Time.time - _bloodMoonStartTime > _bloodMoonDurationSec`.
-        // This forces the raid part to end after 15 minutes real time, regardless of game time?
-        // Or maybe it's a failsafe.
-        // I'll use a fixed value for now or add to config. I'll add RealDurationMinutes to config later if needed.
-        // For now I will use 900f.
+
         
         private bool _bloodMoonActive;
         private float _strategyDecayTimer;
@@ -290,7 +269,9 @@ namespace BloodMoon
                          Multiply(clone.CharacterItem, "WalkSpeed", 1.2f);
                          Multiply(clone.CharacterItem, "RunSpeed", 1.2f);
                          await EquipArmorLevel(clone, 6);
-                        BoostDefense(clone.CharacterItem, false);
+                         BoostDefense(clone.CharacterItem, false);
+                         // Give minions some meds too!
+                         await EnsureMedicalSupplies(clone, 2); 
                         await EnsureMinionWeapon(clone);
                         await EquipMeleeWeaponLevel(clone, 5);
                         await FillHighAmmo(clone, 5);
@@ -381,6 +362,9 @@ namespace BloodMoon
 
         private async UniTask EnhanceBoss(CharacterMainControl c)
         {
+            // IMMEDIATELY disable vanilla AI to prevent logic conflict during async setup
+            DisableVanillaAI(c);
+            
             try
             {
                 var item = c.CharacterItem;
@@ -397,6 +381,9 @@ namespace BloodMoon
                 // Ensure backpack is equipped first to provide space
                 await EquipTopArmor(c);
                 
+                // PRIORITY: Ensure Medical Supplies BEFORE Ammo fills the bag
+                await EnsureMedicalSupplies(c, 4);
+
                 await EnsureTwoGuns(c);
                 await EquipMeleeWeaponLevel(c, 6);
                 await FillBestAmmo(c);
@@ -406,8 +393,6 @@ namespace BloodMoon
                 c.UpdateWeightState();
                 c.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
                 
-                DisableVanillaAI(c);
-
                 // Ensure AI is attached to the boss if not present
                 var custom = c.GetComponent<BloodMoonAIController>();
                 if (custom == null)
@@ -420,7 +405,6 @@ namespace BloodMoon
                 if (ModConfig.Instance.EnableBossGlow) AddBossGlow(c);
                 
                 // Adjust supplies based on backpack status - Dynamic High Value Selection
-                await EnsureMedicalSupplies(c, 4);
                 await EnsureProvisions(c);
                 await AddHighValueLoot(c);
             }
@@ -1133,10 +1117,19 @@ namespace BloodMoon
             
             // 5. If everything fails, return fallback (Player Pos) BUT log warning
             // Ideally we should move it slightly if it's exactly player pos
-            if ((result - fallback).sqrMagnitude < 1f)
+            if ((result - fallback).sqrMagnitude < 225f) // 15m * 15m check
             {
-                Debug.LogWarning("[BloodMoon] Could not find spawn point. Forcing offset.");
-                result = fallback + new Vector3(10, 0, 10); // Force 10m offset at least
+                Debug.LogWarning("[BloodMoon] Could not find spawn point. Forcing safe offset.");
+                // Try to find a point at least 25m away
+                var offset = (result - fallback).normalized;
+                if (offset == Vector3.zero) offset = Vector3.forward;
+                result = fallback + offset * 25f;
+                
+                // Final safety: Put it on ground
+                if (Physics.Raycast(result + Vector3.up * 10f, Vector3.down, out var hit, 20f, GameplayDataSettings.Layers.groundLayerMask))
+                {
+                    result = hit.point;
+                }
             }
             
             return result;

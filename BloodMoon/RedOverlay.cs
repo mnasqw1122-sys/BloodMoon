@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace BloodMoon
 {
@@ -41,8 +42,11 @@ namespace BloodMoon
             }
         }
 
+        private Scene _capturedScene;
+
         private void CaptureOriginals()
         {
+            _capturedScene = SceneManager.GetActiveScene();
             _origFogEnabled = RenderSettings.fog;
             _origFogColor = RenderSettings.fogColor;
             _origFogDensity = RenderSettings.fogDensity;
@@ -53,6 +57,16 @@ namespace BloodMoon
 
         public void Tick(float dt)
         {
+            // Safety: Check scene validity
+            var currentScene = SceneManager.GetActiveScene();
+            if (_captured && currentScene != _capturedScene)
+            {
+                // Scene changed! Our captured data is invalid for this new scene.
+                // Reset capture state so we capture the NEW scene's defaults next frame
+                _captured = false; 
+                // Don't restore old scene's settings to new scene
+            }
+
             // Calculate Transition
             if (_isActive)
             {

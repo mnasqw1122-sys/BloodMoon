@@ -8,6 +8,8 @@ namespace BloodMoon.Utils
     {
         public static async UniTask<Item?> SafeInstantiateById(int id, int maxTries = 3)
         {
+            if (id <= 0) return null; // Invalid ID check
+            
             for (int i = 0; i < maxTries; i++)
             {
                 try
@@ -40,6 +42,11 @@ namespace BloodMoon.Utils
         public static async UniTask<Item?> SafeInstantiateFilter(ItemFilter filter, int maxTries = 5)
         {
             var ids = ItemAssetsCollection.Search(filter);
+            if (ids == null || ids.Length == 0)
+            {
+                Debug.LogWarning($"[BloodMoon] SafeInstantiateFilter found NO items for filter.");
+                return null;
+            }
             return await SafeInstantiateRandom(ids, maxTries);
         }
     }

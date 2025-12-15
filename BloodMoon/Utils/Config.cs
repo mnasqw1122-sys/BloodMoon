@@ -65,6 +65,13 @@ namespace BloodMoon.Utils
                     }
                     else
                     {
+                        // Validate Critical Values (JsonUtility overwrites defaults with 0 if missing)
+                        if (_instance.BossHealthMultiplier <= 0.1f) _instance.BossHealthMultiplier = 4.0f;
+                        if (_instance.MinionHealthMultiplier <= 0.1f) _instance.MinionHealthMultiplier = 2.0f;
+                        if (_instance.SleepHours <= 1f) _instance.SleepHours = 160f;
+                        if (_instance.ActiveHours <= 1f) _instance.ActiveHours = 24f;
+                        if (string.IsNullOrEmpty(_instance.Language)) _instance.Language = "zh-CN";
+
                         Debug.Log($"[BloodMoon] Config loaded. ActiveHours: {_instance.ActiveHours}, BossHP: {_instance.BossHealthMultiplier}");
                     }
                 }

@@ -159,6 +159,9 @@ namespace BloodMoon
             public float lastUpdate;
         }
         public List<LeaderPref> LeaderPrefs = new List<LeaderPref>();
+        
+        // Runtime Cache for O(1) lookup
+        private Dictionary<int, int> _leaderPrefIndexCache = new Dictionary<int, int>();
 
         public void RecordPlayerSpeed(float v)
         {
@@ -342,8 +345,12 @@ namespace BloodMoon
             coverPos = Vector3.zero;
             // Real-time local cover search instead of offline list
             var mask = GameplayDataSettings.Layers.wallLayerMask | GameplayDataSettings.Layers.halfObsticleLayer;
-            int samples = 16;
+            int samples = 8; // Reduced from 16 for performance
             float best = float.NegativeInfinity;
+            
+            // Optimization: Cache transform access
+            Vector3 playerPos = player.transform.position;
+            
             for (int i = 0; i < samples; i++)
             {
                 var rnd = UnityEngine.Random.insideUnitCircle * searchRadius;
@@ -352,8 +359,9 @@ namespace BloodMoon
                 {
                     p = hit.point;
                     var origin = p + Vector3.up * 1.0f;
-                    var target = player.transform.position + Vector3.up * 1.2f;
+                    var target = playerPos + Vector3.up * 1.2f;
                     var dir = target - origin;
+                    // Check if cover blocks view to player
                     if (Physics.Raycast(origin, dir.normalized, dir.magnitude, mask))
                     {
                         // Found a spot blocked from player view
@@ -427,22 +435,55 @@ namespace BloodMoon
 
         public LeaderPref GetLeaderPref(int id)
         {
+            if (_leaderPrefIndexCache.TryGetValue(id, out int idx))
+            {
+                if (idx < LeaderPrefs.Count && LeaderPrefs[idx].id == id) return LeaderPrefs[idx];
+                _leaderPrefIndexCache.Remove(id); // Invalid cache
+            }
+            
             for (int i = 0; i < LeaderPrefs.Count; i++)
             {
-                if (LeaderPrefs[i].id == id) return LeaderPrefs[i];
+                if (LeaderPrefs[i].id == id) 
+                {
+                    _leaderPrefIndexCache[id] = i;
+                    return LeaderPrefs[i];
+                }
             }
             var lp = new LeaderPref { id = id, baseRadius = 3.0f, sideAngle = 30f, spacing = 1.2f, lastUpdate = Time.time };
             LeaderPrefs.Add(lp);
+            _leaderPrefIndexCache[id] = LeaderPrefs.Count - 1;
+            
+            // Prune if too large
+            if (LeaderPrefs.Count > 256)
+            {
+                // Remove oldest
+                int oldestIdx = 0; float oldestTime = float.MaxValue;
+                for(int i=0; i<LeaderPrefs.Count; i++)
+                {
+                    if (LeaderPrefs[i].lastUpdate < oldestTime) { oldestTime = LeaderPrefs[i].lastUpdate; oldestIdx = i; }
+                }
+                LeaderPrefs.RemoveAt(oldestIdx);
+                _leaderPrefIndexCache.Clear(); // Full rebuild needed
+            }
             return lp;
         }
 
         public void UpdateLeaderPref(int id, float pressureScore, Vector3 center)
         {
             int idx = -1;
-            for (int i = 0; i < LeaderPrefs.Count; i++)
+            if (_leaderPrefIndexCache.TryGetValue(id, out int cIdx))
             {
-                if (LeaderPrefs[i].id == id) { idx = i; break; }
+                if (cIdx < LeaderPrefs.Count && LeaderPrefs[cIdx].id == id) idx = cIdx;
             }
+            
+            if (idx == -1)
+            {
+                for (int i = 0; i < LeaderPrefs.Count; i++)
+                {
+                    if (LeaderPrefs[i].id == id) { idx = i; _leaderPrefIndexCache[id] = i; break; }
+                }
+            }
+            
             LeaderPref lp = idx >= 0 ? LeaderPrefs[idx] : GetLeaderPref(id);
             float density = 0f;
             float densNorm = Mathf.Clamp(density / 8f, 0f, 1f);
@@ -454,18 +495,37 @@ namespace BloodMoon
             float targetAngle = Mathf.Lerp(28f, 38f, widen);
             lp.sideAngle = Mathf.Clamp(Mathf.Lerp(lp.sideAngle, targetAngle, 0.1f), 25f, 40f);
             lp.lastUpdate = Time.time;
-            if (idx >= 0) LeaderPrefs[idx] = lp; else LeaderPrefs.Add(lp);
+            if (idx >= 0) LeaderPrefs[idx] = lp; 
+            else 
+            {
+                LeaderPrefs.Add(lp);
+                _leaderPrefIndexCache[id] = LeaderPrefs.Count - 1;
+            }
         }
 
         public void SetLeaderPrefBaseline(int id, float baseRadius, float sideAngle, float spacing)
         {
             int idx = -1;
-            for (int i = 0; i < LeaderPrefs.Count; i++)
+            if (_leaderPrefIndexCache.TryGetValue(id, out int cIdx))
             {
-                if (LeaderPrefs[i].id == id) { idx = i; break; }
+                if (cIdx < LeaderPrefs.Count && LeaderPrefs[cIdx].id == id) idx = cIdx;
             }
+            
+            if (idx == -1)
+            {
+                for (int i = 0; i < LeaderPrefs.Count; i++)
+                {
+                    if (LeaderPrefs[i].id == id) { idx = i; _leaderPrefIndexCache[id] = i; break; }
+                }
+            }
+            
             var lp = new LeaderPref { id = id, baseRadius = baseRadius, sideAngle = sideAngle, spacing = spacing, lastUpdate = Time.time };
-            if (idx >= 0) LeaderPrefs[idx] = lp; else LeaderPrefs.Add(lp);
+            if (idx >= 0) LeaderPrefs[idx] = lp; 
+            else 
+            {
+                LeaderPrefs.Add(lp);
+                _leaderPrefIndexCache[id] = LeaderPrefs.Count - 1;
+            }
         }
 
         public void RecordApproachOutcome(Vector3 point, bool success)
@@ -517,6 +577,13 @@ namespace BloodMoon
             if (!_engagements.ContainsKey(id)) _engagements[id] = new List<CharacterMainControl>();
             
             var list = _engagements[id];
+            
+            // Cleanup nulls while we are here to keep list healthy
+            for (int i = list.Count - 1; i >= 0; i--)
+            {
+                if (list[i] == null) list.RemoveAt(i);
+            }
+            
             if (!list.Contains(attacker)) list.Add(attacker);
         }
 

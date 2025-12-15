@@ -153,21 +153,16 @@ namespace BloodMoon
 
             float healthPct = ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth;
             
-            // Re-tuned Urgency Curve
-            // 70% HP -> 0.16
-            // 50% HP -> 0.35
-            // 30% HP -> 0.60
-            // 10% HP -> 0.85
-            float urgency = Mathf.Pow(1.0f - healthPct, 1.5f);
+            // Linear increase as health drops
+            float urgency = (1.0f - healthPct); // e.g., 0.4 at 60% HP
             
-            // Modifiers
-            
-            // 1. Safety Bonus: If hidden, take opportunity to heal
-            if (!ctx.HasLoS) urgency += 0.3f;
-            
-            // 2. Critical Health Boost: Force heal if dying
-            if (healthPct < 0.35f) urgency += 0.3f;
+            // 1. Critical Health Boost: Force heal if dying
+            if (healthPct < 0.5f) urgency += 0.2f;
+            if (healthPct < 0.25f) urgency += 0.4f;
 
+            // 2. Safety Bonus: If hidden, take opportunity to heal
+            if (!ctx.HasLoS) urgency += 0.2f;
+            
             // 3. Pressure Penalty: Reduced penalty to encourage healing even in combat
             // Bosses are less affected by pressure
             float pressurePenalty = ctx.Controller.IsBoss ? 0.0f : 0.1f;
@@ -177,7 +172,7 @@ namespace BloodMoon
             // Use ID to create a fixed random offset for this agent
             float personality = (ctx.Character.GetInstanceID() % 100) / 1000.0f; // 0.0 to 0.1
             urgency += personality; 
-
+            
             return Mathf.Clamp01(urgency);
         }
         public override void Execute(AIContext ctx)
@@ -379,7 +374,14 @@ namespace BloodMoon
         public Action_Engage() { Name = "Engage"; }
         public override float Evaluate(AIContext ctx)
         {
-            if (ctx.HasLoS && ctx.DistToTarget < 30f)
+            float engageDist = 30f;
+            if (ctx.Character != null)
+            {
+                var gun = ctx.Character.GetGun();
+                if (gun != null) engageDist = Mathf.Max(30f, gun.BulletDistance * 0.8f);
+            }
+
+            if (ctx.HasLoS && ctx.DistToTarget < engageDist)
             {
                 // Base score
                 float score = 0.5f;

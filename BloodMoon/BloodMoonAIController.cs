@@ -152,35 +152,37 @@ namespace BloodMoon
 
             // Throttle Decision Making
             _aiTickTimer += Time.deltaTime;
-            if (_aiTickTimer < AI_TICK_INTERVAL) return;
-            _aiTickTimer = 0f;
-
-            _context.UpdateSensors();
-            
-            // Cooldowns (Update based on interval)
-            foreach (var a in _actions) a.UpdateCooldown(AI_TICK_INTERVAL);
-            
-            // Decision Logic
-            AIAction? bestAction = null;
-            float bestScore = -1f;
-            
-            foreach (var action in _actions)
+            if (_aiTickTimer >= AI_TICK_INTERVAL)
             {
-                float score = action.Evaluate(_context);
-                if (score > bestScore)
+                _aiTickTimer = 0f;
+                _context.UpdateSensors();
+                
+                // Cooldowns (Update based on interval)
+                foreach (var a in _actions) a.UpdateCooldown(AI_TICK_INTERVAL);
+                
+                // Decision Logic
+                AIAction? bestAction = null;
+                float bestScore = -1f;
+                
+                foreach (var action in _actions)
                 {
-                    bestScore = score;
-                    bestAction = action;
+                    float score = action.Evaluate(_context);
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestAction = action;
+                    }
+                }
+                
+                if (bestAction != null && bestAction != _currentAction)
+                {
+                    if (_currentAction != null) _currentAction.OnExit(_context);
+                    _currentAction = bestAction;
+                    _currentAction.OnEnter(_context);
                 }
             }
             
-            if (bestAction != null && bestAction != _currentAction)
-            {
-                if (_currentAction != null) _currentAction.OnExit(_context);
-                _currentAction = bestAction;
-                _currentAction.OnEnter(_context);
-            }
-            
+            // Execute Action (Every Frame for smooth movement/aiming)
             if (_currentAction != null)
             {
                 _currentAction.Execute(_context);
@@ -329,6 +331,26 @@ namespace BloodMoon
 
         public void PerformHeal()
         {
+            // Logic:
+            // 1. If we have a healing item in hand, use it.
+            // 2. If we are NOT safe (HasLoS), we MUST prioritize finding cover before switching/using.
+            // 3. If we are safe OR we can't find cover, then switch and use.
+            
+            bool isSafe = !_context.HasLoS;
+            
+            // Try to find cover if exposed
+            // Bosses might ignore this if they are just topping up, but generally hiding is good
+            if (!isSafe && _coverCooldown <= 0f)
+            {
+                 // Sprint to cover!
+                 if (MoveToCover()) 
+                 {
+                     _c.SetRunInput(true); // Run to cover!
+                     return; // Don't heal yet, just run
+                 }
+            }
+            
+            // Stop to heal if we are safe or gave up on cover
             _c.SetRunInput(false);
             _c.movementControl.SetMoveInput(Vector3.zero);
             
@@ -347,14 +369,6 @@ namespace BloodMoon
                     }
                     return;
                 }
-            }
-
-            // 3. Find cover if exposed (unless we are boss and just want to tank it, or very desperate)
-            // Bosses ignore cover check if HP > 40% to be aggressive
-            bool skipCover = IsBoss && _c.Health.CurrentHealth > _c.Health.MaxHealth * 0.4f;
-            if (!skipCover && _context.HasLoS && _coverCooldown <= 0f)
-            {
-                 if (MoveToCover()) return;
             }
 
             // 4. Find best healing item
@@ -403,23 +417,36 @@ namespace BloodMoon
             // Move to cover while reloading
             if (_context.HasLoS)
             {
-                // If exposed, try to move to cover
+                // 1. Dash to cover if possible and available
+                if (_dashCooldown <= 0f)
+                {
+                     // Dash sideways or back
+                     var dir = -_context.DirToTarget + Random.insideUnitSphere * 0.5f;
+                     dir.y = 0;
+                     _c.movementControl.SetMoveInput(dir.normalized);
+                     _c.Dash();
+                     _dashCooldown = 3f;
+                }
+
+                // 2. If exposed, try to move to cover
                 if (MoveToCover()) return;
                 
-                // If no cover found, erratic movement (strafe)
+                // 3. If no cover found, erratic movement (strafe)
                 // Reuse EngageTarget strafe logic partially or just random move
                  _strafeTimer -= Time.deltaTime;
                 if (_strafeTimer <= 0f)
                 {
                     _strafeDir = Random.value > 0.5f ? 1 : -1;
-                    _strafeTimer = 0.5f;
+                    _strafeTimer = 0.3f; // Fast switching
                 }
                 
                 if (_context.Target != null)
                 {
                      var dir = (_context.Target.transform.position - _c.transform.position).normalized;
                      var perp = Vector3.Cross(dir, Vector3.up) * _strafeDir;
-                     _c.movementControl.SetMoveInput(perp);
+                     // Move back and sideways
+                     var move = (-dir * 0.5f + perp).normalized;
+                     _c.movementControl.SetMoveInput(move);
                      _c.SetRunInput(true); // Run while reloading if possible
                 }
             }
@@ -452,6 +479,11 @@ namespace BloodMoon
             
             float dist = _context.DistToTarget;
             ChooseWeapon(dist);
+
+            // Weapon Type Logic
+            var gun = _c.GetGun();
+            bool isSniper = gun != null && gun.BulletDistance > 80f; // Heuristic
+            bool isShotgun = gun != null && gun.BulletCount < 10 && gun.BulletDistance < 20f; // Heuristic
             
             Vector3 aimPos = PredictAim(_context.Target);
             _c.SetAimPoint(aimPos);
@@ -463,7 +495,10 @@ namespace BloodMoon
             if (_strafeTimer <= 0f)
             {
                 _strafeDir = Random.value > 0.5f ? 1 : -1;
-                _strafeTimer = Random.Range(0.6f, 1.6f);
+                // Randomize duration based on weapon
+                if (isSniper) _strafeTimer = Random.Range(2.0f, 4.0f); // Move less often
+                else if (isShotgun) _strafeTimer = Random.Range(0.3f, 0.8f); // Jittery
+                else _strafeTimer = Random.Range(0.5f, 1.5f);
             }
             
             var perp = Vector3.Cross(dir, Vector3.up) * _strafeDir;
@@ -477,30 +512,69 @@ namespace BloodMoon
                 perp = Vector3.Cross(dir, Vector3.up) * _strafeDir;
             }
             
-            Vector3 move = (perp * 0.8f + dir * 0.2f).normalized;
-            
-            // Maintain distance
+            Vector3 move = Vector3.zero;
             float pref = GetPreferredDistance();
-            if (dist < pref - 2f) move = -dir + perp * 0.5f; // Back up
-            else if (dist > pref + 2f) move = dir + perp * 0.2f; // Close in
+
+            if (isShotgun)
+            {
+                // Aggressive push
+                move = dir * 0.8f + perp * 0.4f; 
+                // Dash forward if far
+                if (dist > 8f && _dashCooldown <= 0f) 
+                {
+                    _c.movementControl.SetMoveInput(dir);
+                    _c.Dash();
+                    _dashCooldown = 2.5f;
+                }
+            }
+            else if (isSniper)
+            {
+                // Keep distance, steady aim
+                if (dist < pref - 5f) move = -dir; // Retreat
+                else if (_shootTimer > 0f) move = perp * 0.3f; // Slow strafe while cooling down
+                else move = Vector3.zero; // Stop to shoot
+            }
+            else // Rifle/Standard
+            {
+                 // Dynamic strafing
+                 move = (perp * 0.8f + dir * 0.2f).normalized;
+                 if (dist < pref - 3f) move = -dir + perp * 0.5f;
+                 else if (dist > pref + 3f) move = dir + perp * 0.2f;
+
+                 // Random roll during combat
+                 if (_dashCooldown <= 0f && Random.value < 0.01f) // 1% chance per frame
+                 {
+                     _c.movementControl.SetMoveInput(move);
+                     _c.Dash();
+                     _dashCooldown = Random.Range(3f, 6f);
+                 }
+            }
             
             _c.movementControl.SetMoveInput(move.normalized);
             
             // Tactical Stance: ADS if shooting and not moving fast
-            bool shouldAds = dist > 10f && _shootTimer <= 0f; 
+            bool shouldAds = (dist > 15f && !isShotgun) || (isSniper);
             _c.SetAdsInput(shouldAds);
             _c.SetRunInput(!shouldAds && move.magnitude > 0.1f);
             
             // Shooting
             if (_shootTimer <= 0f)
             {
-                _c.Trigger(true, true, false);
-                // Burst logic
-                var gun = _c.GetGun();
-                if (gun != null && gun.BulletDistance > 50f) // Sniper/DMR
-                    _shootTimer = Random.Range(0.8f, 1.5f);
-                else
-                    _shootTimer = Random.Range(0.2f, 0.5f);
+                bool fire = true;
+                // For sniper, ensure we are steady?
+                if (isSniper && _c.Velocity.magnitude > 1f) fire = false;
+
+                if (fire)
+                {
+                    _c.Trigger(true, true, false);
+                    // Burst logic
+                    if (isSniper)
+                        _shootTimer = Random.Range(1.5f, 2.5f);
+                    else if (isShotgun)
+                         _shootTimer = Random.Range(0.5f, 1.0f);
+                    else
+                        _shootTimer = Random.Range(0.2f, 0.5f);
+                }
             }
             else
             {
@@ -1082,11 +1156,31 @@ namespace BloodMoon
         
         private void HandleDash()
         {
-            if (_dashCooldown <= 0f && _hurtRecently)
+            if (_dashCooldown > 0f) return;
+            
+            // 1. Reactive Dash (Hurt)
+            if (_hurtRecently)
             {
+                // Dodge sideways
+                var dir = _c.movementControl.MoveInput;
+                if (dir.magnitude < 0.1f) dir = Random.insideUnitSphere;
+                dir.y = 0;
+                
+                _c.movementControl.SetMoveInput(dir.normalized);
                 _c.Dash();
-                _dashCooldown = 3f;
+                _dashCooldown = Random.Range(2f, 4f);
                 _hurtRecently = false;
+                return;
+            }
+            
+            // 2. Proactive Dash (Randomly while moving to avoid shots)
+            if (_context.HasLoS && _c.Velocity.magnitude > 2f)
+            {
+                if (Random.value < 0.005f) // Small chance per frame
+                {
+                     _c.Dash();
+                     _dashCooldown = Random.Range(3f, 6f);
+                }
             }
         }
         

@@ -85,6 +85,7 @@ namespace BloodMoon
             UniTask.Void(async () =>
             {
                 await UniTask.WaitUntil(() => LevelManager.LevelInited);
+                if (this == null || _ui == null) return; // Safety check after await
                 _ui.AttachToTimeOfDayDisplay();
             });
             LevelManager.OnLevelInitialized += OnLevelInitialized;
@@ -97,6 +98,9 @@ namespace BloodMoon
 
         private void OnLevelInitialized()
         {
+            // Clear cache on level load to free memory and handle potential item pool changes
+            BloodMoon.Utils.ItemSelector.ClearCache();
+            
             // Reload config on every level start to support hot-swapping values
             BloodMoon.Utils.ModConfig.Load();
 
@@ -112,18 +116,34 @@ namespace BloodMoon
             }
         }
 
+        private float _uiRefreshTimer;
+
         private void Update()
         {
             var now = GameClock.Now;
             bool active = _event.IsActive(now);
-            _ui.Refresh(now);
+
+            // Throttle UI updates to 2Hz (every 0.5s) to save performance
+            _uiRefreshTimer += Time.deltaTime;
+            if (_uiRefreshTimer > 0.5f)
+            {
+                _uiRefreshTimer = 0f;
+                _ui.Refresh(now);
+            }
+            
+            // Logic Safety: Check if LevelManager is valid first
+            if (LevelManager.Instance == null) 
+            {
+                _overlay.Hide();
+                return;
+            }
             
             // Disable Boss logic in Base Level, but keep UI updating
-            if (LevelManager.Instance != null && LevelManager.Instance.IsBaseLevel)
+            if (LevelManager.Instance.IsBaseLevel)
             {
                 _overlay.Hide();
             }
-            else if (active && LevelManager.Instance != null && LevelManager.Instance.IsRaidMap)
+            else if (active && LevelManager.Instance.IsRaidMap)
             {
                 _overlay.Show();
                 _bossManager.Tick();

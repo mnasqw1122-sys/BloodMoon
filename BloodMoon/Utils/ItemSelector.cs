@@ -102,94 +102,76 @@ namespace BloodMoon.Utils
             {
                 if (tagNames == null || tagNames.Length == 0) return new List<int>();
 
-                // Cache Check
+                // Cache Check - REMOVED count from key to allow reuse
                 var sortedTags = tagNames.Where(t => !string.IsNullOrEmpty(t)).OrderBy(t => t).ToArray();
-                string key = $"Tags:{string.Join("|", sortedTags)}_C:{count}_Q:{minQuality}_V:{minValue}";
+                string key = $"Tags:{string.Join("|", sortedTags)}_Q:{minQuality}_V:{minValue}";
                 
-                if (_cache.TryGetValue(key, out var cachedResult))
+                List<int> cachedList;
+                if (!_cache.TryGetValue(key, out cachedList))
                 {
-                    return new List<int>(cachedResult);
-                }
-
-                var tags = new List<Tag>();
-                foreach (var name in sortedTags)
-                {
-                    try
+                    // Compute full list
+                    cachedList = new List<int>();
+                    var tags = new List<Tag>();
+                    foreach (var name in sortedTags)
                     {
-                        var t = TagUtilities.TagFromString(name);
-                        if (t != null) tags.Add(t);
-                    }
-                    catch { } // Ignore tag parsing errors
-                }
-
-                if (tags.Count == 0) 
-                {
-                    _cache[key] = new List<int>();
-                    return new List<int>();
-                }
-
-                var allCandidates = new HashSet<int>();
-                
-                foreach (var tag in tags)
-                {
-                    try
-                    {
-                        var filter = new ItemFilter 
-                        { 
-                            requireTags = new Tag[] { tag }, 
-                            minQuality = minQuality,
-                            maxQuality = 6 
-                        };
-                        var ids = ItemAssetsCollection.Search(filter);
-                        if (ids != null)
+                        try
                         {
-                            for (int i = 0; i < ids.Length; i++)
+                            var t = TagUtilities.TagFromString(name);
+                            if (t != null) tags.Add(t);
+                        }
+                        catch { } 
+                    }
+
+                    if (tags.Count > 0) 
+                    {
+                        var allCandidates = new HashSet<int>();
+                        foreach (var tag in tags)
+                        {
+                            try
                             {
-                                allCandidates.Add(ids[i]);
+                                // OR Logic: Combine results of each tag
+                                var filter = new ItemFilter 
+                                { 
+                                    requireTags = new Tag[] { tag }, 
+                                    minQuality = minQuality,
+                                    maxQuality = 6 
+                                };
+                                var ids = ItemAssetsCollection.Search(filter);
+                                if (ids != null)
+                                {
+                                    for (int i = 0; i < ids.Length; i++) allCandidates.Add(ids[i]);
+                                }
                             }
+                            catch { }
                         }
-                    }
-                    catch (Exception e)
-                    {
-                        Debug.LogWarning($"[BloodMoon] Error searching items for tag {tag?.name}: {e.Message}");
-                    }
-                }
 
-                if (allCandidates.Count == 0)
-                {
-                     _cache[key] = new List<int>();
-                     return new List<int>();
-                }
-
-                var itemsWithValues = new List<(int ID, int Price)>();
-
-                foreach (var id in allCandidates)
-                {
-                    try
-                    {
-                        var meta = ItemAssetsCollection.GetMetaData(id);
-                        if (meta.id != 0 && meta.priceEach >= minValue)
+                        var itemsWithValues = new List<(int ID, int Price)>();
+                        foreach (var id in allCandidates)
                         {
-                            itemsWithValues.Add((id, meta.priceEach));
+                            try
+                            {
+                                var meta = ItemAssetsCollection.GetMetaData(id);
+                                if (meta.id != 0 && meta.priceEach >= minValue)
+                                {
+                                    itemsWithValues.Add((id, meta.priceEach));
+                                }
+                            }
+                            catch { }
                         }
+                        
+                        // Sort descending by price
+                        itemsWithValues.Sort((a, b) => b.Price.CompareTo(a.Price));
+                        cachedList = itemsWithValues.Select(x => x.ID).ToList();
                     }
-                    catch { }
+                    
+                    _cache[key] = cachedList;
                 }
 
-                if (itemsWithValues.Count == 0)
-                {
-                     _cache[key] = new List<int>();
-                     return new List<int>();
-                }
-
-                var result = itemsWithValues
-                    .OrderByDescending(x => x.Price)
-                    .Take(count)
-                    .Select(x => x.ID)
-                    .ToList();
+                // Now just take what we need from cache
+                if (cachedList.Count == 0) return new List<int>();
                 
-                _cache[key] = result;
-                return result;
+                if (count >= cachedList.Count) return new List<int>(cachedList);
+                return cachedList.GetRange(0, count);
             }
         }
         

@@ -28,10 +28,18 @@ namespace BloodMoon.Utils
 
         public static string Get(string key)
         {
-            string lang = ModConfig.Instance.Language;
+            // Safety: Handle config not ready
+            string lang = "en-US";
+            if (ModConfig.Instance != null) lang = ModConfig.Instance.Language;
+            
             if (!_texts.ContainsKey(lang)) lang = "en-US";
             
+            // Try target language
             if (_texts[lang].TryGetValue(key, out var val)) return val;
+            
+            // Fallback: Try English if key is missing in target language
+            if (lang != "en-US" && _texts["en-US"].TryGetValue(key, out var enVal)) return enVal;
+            
             return key;
         }
     }
