@@ -17,10 +17,15 @@ namespace BloodMoon
             _event = e;
         }
 
-        public void AttachToTimeOfDayDisplay()
+        public bool IsAttached => _title != null;
+
+        public bool TryAttachToTimeOfDayDisplay()
         {
+            if (IsAttached) return true;
+            
             var tod = UnityEngine.Object.FindObjectOfType<TimeOfDayDisplay>();
-            if (tod == null) return;
+            if (tod == null) return false;
+            
             if (_title != null) UnityEngine.Object.Destroy(_title.gameObject);
             _title = UnityEngine.Object.Instantiate(GameplayDataSettings.UIStyle.TemplateTextUGUI);
             _title.text = string.Format(Localization.Get("UI_Format"), Localization.Get("Event_Incoming"), "000:00");
@@ -29,6 +34,7 @@ namespace BloodMoon
             _title.transform.localScale = Vector3.one;
             _title.fontSize = tod.stormTitleText.fontSize;
             _title.rectTransform.anchoredPosition = tod.stormTitleText.rectTransform.anchoredPosition + new Vector2(0, -75);
+            return true;
         }
 
         private string _lastTimeStr = string.Empty;

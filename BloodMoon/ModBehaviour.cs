@@ -86,7 +86,15 @@ namespace BloodMoon
             {
                 await UniTask.WaitUntil(() => LevelManager.LevelInited);
                 if (this == null || _ui == null) return; // Safety check after await
-                _ui.AttachToTimeOfDayDisplay();
+                
+                // Retry attaching UI for a few seconds as TimeOfDayDisplay might be late
+                float timeout = 5.0f;
+                while (timeout > 0f)
+                {
+                    if (_ui.TryAttachToTimeOfDayDisplay()) break;
+                    await UniTask.Delay(500);
+                    timeout -= 0.5f;
+                }
             });
             LevelManager.OnLevelInitialized += OnLevelInitialized;
         }
@@ -104,7 +112,7 @@ namespace BloodMoon
             // Reload config on every level start to support hot-swapping values
             BloodMoon.Utils.ModConfig.Load();
 
-            _ui.AttachToTimeOfDayDisplay();
+            _ui.TryAttachToTimeOfDayDisplay();
             
             // Safety check for base level
             if (LevelManager.Instance != null && LevelManager.Instance.IsBaseLevel) return;

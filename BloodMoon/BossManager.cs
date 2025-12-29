@@ -628,22 +628,29 @@ namespace BloodMoon
         
         private async System.Threading.Tasks.Task EnsureProvisions(CharacterMainControl c)
         {
-             // System supplement: Food/Drink - High Value
-             // "Food" and "Drink" are valid tags. "Consumable" is not.
-             var tags = new string[] { "Food", "Drink" };
-             var items = BloodMoon.Utils.ItemSelector.GetBestItemsByTags(tags, 5, minValue: 5);
-             if (items.Count == 0) return;
-             
-             // Add 1-2 provisions
-             int count = UnityEngine.Random.Range(1, 3);
-             for(int i=0; i<count; i++)
+             try
              {
-                 int id = items[UnityEngine.Random.Range(0, items.Count)];
-                 var item = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
-                 if (item != null)
+                 // System supplement: Food/Drink - High Value
+                 // "Food" and "Drink" are valid tags. "Consumable" is not.
+                 var tags = new string[] { "Food", "Drink" };
+                 var items = BloodMoon.Utils.ItemSelector.GetBestItemsByTags(tags, 5, minValue: 5);
+                 if (items.Count == 0) return;
+                 
+                 // Add 1-2 provisions
+                 int count = UnityEngine.Random.Range(1, 3);
+                 for(int i=0; i<count; i++)
                  {
-                     if (!c.CharacterItem.Inventory.AddItem(item)) item.DestroyTree();
+                     int id = items[UnityEngine.Random.Range(0, items.Count)];
+                     var item = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
+                     if (item != null)
+                     {
+                         if (!c.CharacterItem.Inventory.AddItem(item)) item.DestroyTree();
+                     }
                  }
+             }
+             catch (System.Exception e)
+             {
+                 Debug.LogWarning($"[BloodMoon] EnsureProvisions Warning: {e.Message}");
              }
         }
 
