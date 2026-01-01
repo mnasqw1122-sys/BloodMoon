@@ -16,14 +16,14 @@ namespace BloodMoon
         [Serializable]
         private class GlobalSaveData
         {
-            public List<float> playerSpeedSamples = new List<float>();
+            public float avgPlayerSpeed = 3.0f;
             public List<ApproachStat> approachStats = new List<ApproachStat>();
             public List<KeyWeight> strategyWeights = new List<KeyWeight>();
             public List<LeaderPref> leaderPrefs = new List<LeaderPref>();
 
             public void FromStore(AIDataStore s)
             {
-                playerSpeedSamples = s._playerSpeedSamples;
+                avgPlayerSpeed = s._avgPlayerSpeed;
                 approachStats = s.ApproachStats;
                 strategyWeights = s.StrategyWeights;
                 leaderPrefs = s.LeaderPrefs;
@@ -31,7 +31,7 @@ namespace BloodMoon
 
             public void ToStore(AIDataStore s)
             {
-                if (playerSpeedSamples != null) s._playerSpeedSamples = playerSpeedSamples;
+                s._avgPlayerSpeed = avgPlayerSpeed;
                 if (approachStats != null) s.ApproachStats = approachStats;
                 if (strategyWeights != null) s.StrategyWeights = strategyWeights;
                 if (leaderPrefs != null) s.LeaderPrefs = leaderPrefs;
@@ -70,7 +70,7 @@ namespace BloodMoon
         private const string FolderName = "BloodMoonAI";
         private const string GlobalFileName = "global_tactics.json";
 
-        private List<float> _playerSpeedSamples = new List<float>();
+        private float _avgPlayerSpeed = 3.0f;
         public Vector3 LastKnownPlayerPos;
         public float LastSeenTime;
         public List<Vector3> PlayerAmbushSpots = new List<Vector3>();
@@ -149,10 +149,11 @@ namespace BloodMoon
             public float w;
         }
         public List<KeyWeight> StrategyWeights = new List<KeyWeight>();
+
         [Serializable]
         public struct LeaderPref
         {
-            public int id;
+            public string id;
             public float baseRadius;
             public float sideAngle;
             public float spacing;
@@ -161,27 +162,20 @@ namespace BloodMoon
         public List<LeaderPref> LeaderPrefs = new List<LeaderPref>();
         
         // Runtime Cache for O(1) lookup
-        private Dictionary<int, int> _leaderPrefIndexCache = new Dictionary<int, int>();
+        private Dictionary<string, int> _leaderPrefIndexCache = new Dictionary<string, int>();
 
         public void RecordPlayerSpeed(float v)
         {
             if (v > 0.05f && v < 15f)
             {
-                _playerSpeedSamples.Add(v);
-                if (_playerSpeedSamples.Count > 1000) _playerSpeedSamples.RemoveAt(0);
+                // Exponential Moving Average (EMA) with alpha = 0.05
+                _avgPlayerSpeed = Mathf.Lerp(_avgPlayerSpeed, v, 0.05f);
             }
         }
 
         public float GetAverageSpeed()
         {
-            if (_playerSpeedSamples.Count == 0) return 3f;
-            var valid = _playerSpeedSamples.Where(x => x > 0.05f && x < 15f).ToArray();
-            if (valid.Length == 0) return 3f;
-            float s = 0f;
-            for (int i = 0; i < valid.Length; i++) s += valid[i];
-            float avg = s / valid.Length;
-            if (avg < 0.5f) return 3f;
-            return avg;
+            return _avgPlayerSpeed;
         }
 
         public void MarkDanger(Vector3 pos)
@@ -298,15 +292,11 @@ namespace BloodMoon
                     string json = File.ReadAllText(globalPath);
                     var globalData = JsonUtility.FromJson<GlobalSaveData>(json);
                     if (globalData != null) globalData.ToStore(this);
-                    if (_playerSpeedSamples != null)
-                    {
-                        _playerSpeedSamples = _playerSpeedSamples.Where(x => x > 0.05f && x < 15f).Take(1000).ToList();
-                    }
                 }
                 else
                 {
                     // Defaults for global
-                    _playerSpeedSamples = new List<float>();
+                    _avgPlayerSpeed = 3.0f;
                     ApproachStats = new List<ApproachStat>();
                     StrategyWeights = new List<KeyWeight>();
                     LeaderPrefs = new List<LeaderPref>();
@@ -433,7 +423,7 @@ namespace BloodMoon
             }
         }
 
-        public LeaderPref GetLeaderPref(int id)
+        public LeaderPref GetLeaderPref(string id)
         {
             if (_leaderPrefIndexCache.TryGetValue(id, out int idx))
             {
@@ -468,7 +458,7 @@ namespace BloodMoon
             return lp;
         }
 
-        public void UpdateLeaderPref(int id, float pressureScore, Vector3 center)
+        public void UpdateLeaderPref(string id, float pressureScore, Vector3 center)
         {
             int idx = -1;
             if (_leaderPrefIndexCache.TryGetValue(id, out int cIdx))
@@ -503,7 +493,7 @@ namespace BloodMoon
             }
         }
 
-        public void SetLeaderPrefBaseline(int id, float baseRadius, float sideAngle, float spacing)
+        public void SetLeaderPrefBaseline(string id, float baseRadius, float sideAngle, float spacing)
         {
             int idx = -1;
             if (_leaderPrefIndexCache.TryGetValue(id, out int cIdx))
@@ -530,7 +520,14 @@ namespace BloodMoon
 
         public void RecordApproachOutcome(Vector3 point, bool success)
         {
-            int idx = -1; float minDist = 1.5f;
+            // Grid Snap (Quantize) to 2m grid to generalize learning
+            point = new Vector3(
+                Mathf.Round(point.x / 2f) * 2f,
+                Mathf.Round(point.y / 1f) * 1f, // Y matters less but snap to 1m
+                Mathf.Round(point.z / 2f) * 2f
+            );
+
+            int idx = -1; float minDist = 0.5f; // Since we snap, exact match is likely
             for (int i = 0; i < ApproachStats.Count; i++)
             {
                 if (Vector3.Distance(ApproachStats[i].pos, point) < minDist) { idx = i; break; }
@@ -546,12 +543,19 @@ namespace BloodMoon
                 st.lastTime = Time.time;
                 ApproachStats[idx] = st;
             }
-            if (ApproachStats.Count > 60) ApproachStats.RemoveAt(0);
+            if (ApproachStats.Count > 120) ApproachStats.RemoveAt(0); // Increased buffer
         }
 
         public float GetApproachWeight(Vector3 point)
         {
-            float w = 1f; float minDist = 1.5f;
+            // Quantize to match recording (Model lookup)
+            point = new Vector3(
+                Mathf.Round(point.x / 2f) * 2f,
+                Mathf.Round(point.y / 1f) * 1f,
+                Mathf.Round(point.z / 2f) * 2f
+            );
+
+            float w = 1f; float minDist = 0.5f;
             for (int i = 0; i < ApproachStats.Count; i++)
             {
                 var st = ApproachStats[i];
@@ -560,7 +564,19 @@ namespace BloodMoon
                     float s = Mathf.Max(0, st.success);
                     float f = Mathf.Max(0, st.fail);
                     float recency = Mathf.Exp(-Mathf.Max(0f, Time.time - st.lastTime) / 120f);
-                    w = (1f + s) / (1f + f) * (1f + 0.3f * recency);
+                    // Thompson Sampling-ish heuristic: (success + 1) / (total + 2)
+                    // But here we want a weight multiplier.
+                    // If high success -> weight > 1. If high fail -> weight < 1.
+                    float total = s + f;
+                    if (total > 0)
+                    {
+                        float rate = s / total;
+                        // Bias towards 1.0 if low samples (recency decay also lowers confidence)
+                        w = Mathf.Lerp(1.0f, rate * 2.0f, Mathf.Clamp01(total / 5f) * recency); 
+                        // Map 0..1 rate to 0.5..1.5 multiplier range? Or 0..2?
+                        // Let's say: rate 0.5 -> 1.0. rate 1.0 -> 2.0. rate 0.0 -> 0.0?
+                        // If we fail a lot, we want to discourage (w < 1).
+                    }
                     break;
                 }
             }

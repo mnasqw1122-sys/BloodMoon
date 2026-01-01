@@ -1,111 +1,28 @@
 using System;
-using System.IO;
-using System.Text;
 using UnityEngine;
 
 namespace BloodMoon.Utils
 {
-    [Serializable]
+    // Hardcoded configuration as per request. No file I/O.
     public class ModConfig
     {
-        public float SleepHours = 160f;
-        public float ActiveHours = 24f;
-        public float BossHealthMultiplier = 4.0f;
-        public float MinionHealthMultiplier = 2.0f;
-        public int BossMinionCount = 3;
-        // public int MaxMinionsPerMap = 15;
-        public float BossDefense = 10f;
-        public float MinionDefense = 8f;
-        public bool EnableBossGlow = true;
-        public string Language = "zh-CN"; // "en-US"
+        // Fixed Values
+        public float SleepHours { get; } = 160f;
+        public float ActiveHours { get; } = 48f;
+        public float BossHealthMultiplier { get; } = 4.0f;
+        public float MinionHealthMultiplier { get; } = 2.0f;
+        public int BossMinionCount { get; } = 5;
+        public float BossDefense { get; } = 10f;
+        public float MinionDefense { get; } = 8f;
+        public bool EnableBossGlow { get; } = true;
+        public string Language { get; } = "zh-CN";
 
-        private static ModConfig? _instance;
-        public static ModConfig Instance
-        {
-            get
-            {
-                if (_instance == null) Load();
-                return _instance!;
-            }
-        }
+        // Singleton instance (Lazy load unnecessary now but kept for compatibility)
+        private static readonly ModConfig _instance = new ModConfig();
+        public static ModConfig Instance => _instance;
 
-        public static void Load()
-        {
-            // Strategy 1: Relative to Data Path (Most reliable for Unity Games)
-            string root = Directory.GetParent(Application.dataPath).FullName;
-            string path = Path.Combine(root, "UserData", "BloodMoon", "config.json");
-            
-            // Strategy 2: Current Directory (Fallback for some launchers)
-            if (!File.Exists(path))
-            {
-                string cwdPath = Path.Combine(Directory.GetCurrentDirectory(), "UserData", "BloodMoon", "config.json");
-                if (File.Exists(cwdPath))
-                {
-                    path = cwdPath;
-                    Debug.Log($"[BloodMoon] Found config in CWD: {path}");
-                }
-            }
-
-            Debug.Log($"[BloodMoon] Attempting to load config from: {path}");
-
-            if (File.Exists(path))
-            {
-                try
-                {
-                    // Let .NET auto-detect encoding for reading to be safe with ANSI/UTF-8
-                    string json = File.ReadAllText(path);
-                    Debug.Log($"[BloodMoon] Read JSON content (len={json.Length}): {json}"); 
-                    
-                    _instance = JsonUtility.FromJson<ModConfig>(json);
-                    
-                    if (_instance == null) 
-                    {
-                        Debug.LogError("[BloodMoon] JsonUtility returned null! JSON might be invalid.");
-                        _instance = new ModConfig();
-                    }
-                    else
-                    {
-                        // Validate Critical Values (JsonUtility overwrites defaults with 0 if missing)
-                        if (_instance.BossHealthMultiplier <= 0.1f) _instance.BossHealthMultiplier = 4.0f;
-                        if (_instance.MinionHealthMultiplier <= 0.1f) _instance.MinionHealthMultiplier = 2.0f;
-                        if (_instance.SleepHours <= 1f) _instance.SleepHours = 160f;
-                        if (_instance.ActiveHours <= 1f) _instance.ActiveHours = 24f;
-                        if (string.IsNullOrEmpty(_instance.Language)) _instance.Language = "zh-CN";
-
-                        Debug.Log($"[BloodMoon] Config loaded. ActiveHours: {_instance.ActiveHours}, BossHP: {_instance.BossHealthMultiplier}");
-                    }
-                }
-                catch (Exception e)
-                {
-                    Debug.LogError($"[BloodMoon] Failed to load config: {e}");
-                    // Do not overwrite the file if it's broken, just use defaults in memory
-                    _instance = new ModConfig();
-                }
-            }
-            else
-            {
-                Debug.Log($"[BloodMoon] Config not found at {path}, creating default.");
-                _instance = new ModConfig();
-                // Ensure directory exists before saving
-                string dir = Path.GetDirectoryName(path);
-                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                Save();
-            }
-        }
-
-        public static void Save()
-        {
-            if (_instance == null) return;
-            
-            // Always save to the DataPath location to standardise
-            string root = Directory.GetParent(Application.dataPath).FullName;
-            string dir = Path.Combine(root, "UserData", "BloodMoon");
-            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            string path = Path.Combine(dir, "config.json");
-            
-            // Use UTF8 for writing new files
-            File.WriteAllText(path, JsonUtility.ToJson(_instance, true), Encoding.UTF8);
-            Debug.Log($"[BloodMoon] Config saved to {path}");
-        }
+        // Methods are no-ops or removed
+        public static void Load() { }
+        public static void Save() { }
     }
 }

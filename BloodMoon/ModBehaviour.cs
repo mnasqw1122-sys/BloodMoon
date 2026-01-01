@@ -106,11 +106,9 @@ namespace BloodMoon
 
         private void OnLevelInitialized()
         {
-            // Clear cache on level load to free memory and handle potential item pool changes
-            BloodMoon.Utils.ItemSelector.ClearCache();
-            
+
             // Reload config on every level start to support hot-swapping values
-            BloodMoon.Utils.ModConfig.Load();
+            // BloodMoon.Utils.ModConfig.Load();
 
             _ui.TryAttachToTimeOfDayDisplay();
             

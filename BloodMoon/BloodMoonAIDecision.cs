@@ -36,10 +36,64 @@ namespace BloodMoon
         public bool IsBoss => Controller != null && Controller.IsBoss;
         public bool IsRaged => Controller != null && Controller.IsRaged;
 
+        // Static Cache for Target Acquisition
+        private static List<CharacterMainControl> _cachedCharacters = new List<CharacterMainControl>();
+        private static float _lastCacheTime;
+
+        private static void CacheAllCharacters()
+        {
+            if (Time.time - _lastCacheTime < 1.0f) return;
+            _lastCacheTime = Time.time;
+            
+            _cachedCharacters.Clear();
+            _cachedCharacters.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
+        }
+
         public void UpdateSensors()
         {
-            if (Character == null || CharacterMainControl.Main == null) return;
-            Target = CharacterMainControl.Main;
+            if (Character == null) return;
+
+            // 1. Update Global Cache periodically (Shared by all AI)
+            CacheAllCharacters();
+
+            // 2. Select Best Target
+            CharacterMainControl? bestTarget = CharacterMainControl.Main;
+            float bestDistSq = float.MaxValue;
+            Vector3 myPos = Character.transform.position;
+
+            if (bestTarget != null)
+            {
+                bestDistSq = (bestTarget.transform.position - myPos).sqrMagnitude;
+            }
+
+            // Scan for other hostile targets
+            if (_cachedCharacters != null)
+            {
+                var myTeam = Character.Team;
+                int count = _cachedCharacters.Count;
+                for(int i=0; i<count; i++)
+                {
+                    var c = _cachedCharacters[i];
+                    if (c == null || c == Character) continue;
+                    if (c.Health.CurrentHealth <= 0) continue;
+                    
+                    // Hostility Logic: Attack different teams
+                    // Assuming Teams.Neutral is handled elsewhere or doesn't exist.
+                    // Specifically targeting Native Enemies (usually Team 2) and Player (Team 1)
+                    if (c.Team != myTeam) 
+                    {
+                        float d2 = (c.transform.position - myPos).sqrMagnitude;
+                        if (d2 < bestDistSq)
+                        {
+                            bestDistSq = d2;
+                            bestTarget = c;
+                        }
+                    }
+                }
+            }
+
+            Target = bestTarget;
+            if (Target == null) return;
             
             var diff = Target.transform.position - Character.transform.position;
             diff.y = 0f;
@@ -348,19 +402,37 @@ namespace BloodMoon
         public Action_Suppress() { Name = "Suppress"; }
         public override float Evaluate(AIContext ctx)
         {
-            // If no LoS, but we have a recent position, and we have ammo
-            if (!ctx.HasLoS && ctx.LastSeenTime > 0f && (Time.time - ctx.LastSeenTime < 3f) && !ctx.IsLowAmmo)
+            if (ctx.Character == null || ctx.Target == null) return 0f;
+            
+            // Cannot suppress without ammo
+            if (ctx.IsLowAmmo || ctx.IsReloading) return 0f;
+
+            // 1. SQUAD TACTIC: Support Flankers
+            // If allies are flanking (we can infer or check store), we should suppress
+            if (ctx.Store != null)
             {
-                // If we are relatively safe
-                if (ctx.Pressure < 2f) return 0.6f;
-                
-                // SQUAD TACTIC: Support flanking allies
-                if (ctx.Store != null && ctx.Target != null)
+                // Check if anyone else is engaging?
+                int engaging = ctx.Store.GetEngagementCount(ctx.Target);
+                // If we are part of a group (2+), one should suppress
+                // Simple role assignment: ID based or Random?
+                // Let's use distance: Farthest ally suppresses
+                if (engaging > 0 && ctx.DistToTarget > 20f && ctx.HasLoS)
                 {
-                    // If others are flanking (no direct API yet, but if engagement is high)
-                    if (ctx.Store.GetEngagementCount(ctx.Target) > 1) return 0.75f;
+                    return 0.7f;
                 }
             }
+
+            // 2. Blind Fire: If no LoS but recent contact
+            if (!ctx.HasLoS && ctx.LastSeenTime > 0f && (Time.time - ctx.LastSeenTime < 4f))
+            {
+                // Only if we have plenty of ammo
+                var gun = ctx.Character.GetGun();
+                if (gun != null && gun.BulletCount > gun.Capacity * 0.5f)
+                {
+                     return 0.65f;
+                }
+            }
+            
             return 0f;
         }
         public override void Execute(AIContext ctx)
@@ -514,27 +586,36 @@ namespace BloodMoon
         public Action_Flank() { Name = "Flank"; }
         public override float Evaluate(AIContext ctx)
         {
-            // If we have LoS but are far away, or if we are blocked
-            if (ctx.HasLoS && ctx.DistToTarget > 20f && ctx.Pressure < 1.5f)
-            {
-                return 0.45f;
-            }
-            
-            // SQUAD TACTIC: If too many people engaging, flank instead
-            if (ctx.Store != null && ctx.Target != null)
+            if (ctx.Character == null || ctx.Target == null) return 0f;
+
+            // 1. Basic Flanking Condition: Good health, some distance
+            float hp = ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth;
+            if (hp < 0.4f) return 0f; // Don't flank if injured
+
+            // 2. SQUAD TACTIC: If target is suppressed or engaging someone else
+            if (ctx.Store != null)
             {
                 int engaging = ctx.Store.GetEngagementCount(ctx.Target);
-                // Dynamic threshold based on boss presence
-                int threshold = (ctx.Controller != null && ctx.Controller.IsBoss) ? 3 : 2;
-                if (engaging > threshold) return 0.85f; // Increased priority to force flanking when crowded
+                // If 2+ allies are engaging, or 1 ally is suppressing, we should flank
+                if (engaging >= 2) return 0.75f;
+            }
+            
+            // 3. Situational: If we have LoS but are at suboptimal range/angle
+            // Check if we are "in front" of target (dangerous)
+            Vector3 toMe = (ctx.Character.transform.position - ctx.Target.transform.position).normalized;
+            float angle = Vector3.Angle(ctx.Target.transform.forward, toMe);
+            if (angle < 45f && ctx.HasLoS && ctx.Pressure < 2f)
+            {
+                // We are in their face, try to flank to side
+                return 0.6f;
             }
 
-            // If no LoS but we know where they are, maybe flank instead of chase?
-            if (!ctx.HasLoS && ctx.LastSeenTime > 0f)
+            // 4. If no LoS but we know position, flank instead of direct chase
+            if (!ctx.HasLoS && ctx.LastSeenTime > 0f && Time.time - ctx.LastSeenTime < 10f)
             {
-                // 50/50 chance to flank vs chase if not urgent
-                return 0.3f;
+                return 0.5f;
             }
+
             return 0f;
         }
         public override void Execute(AIContext ctx)

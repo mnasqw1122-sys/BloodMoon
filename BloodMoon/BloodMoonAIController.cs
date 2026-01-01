@@ -335,6 +335,7 @@ namespace BloodMoon
             // 1. If we have a healing item in hand, use it.
             // 2. If we are NOT safe (HasLoS), we MUST prioritize finding cover before switching/using.
             // 3. If we are safe OR we can't find cover, then switch and use.
+            // 4. Distinguish between Health Recovery (Medkits) and Buffs (Stimulants/Painkillers)
             
             bool isSafe = !_context.HasLoS;
             
@@ -354,46 +355,85 @@ namespace BloodMoon
             _c.SetRunInput(false);
             _c.movementControl.SetMoveInput(Vector3.zero);
             
-            // 1. If holding drug/food
+            // Current Health Status
+            float hpPercent = _c.Health.CurrentHealth / _c.Health.MaxHealth;
+            bool needHealth = hpPercent < 0.8f;
+            // Simplified check: assume we need buffs if healthy but in combat, or if we have specific debuffs (not easily checkable here without deep integration)
+            // For now, let's say we want buffs if HP > 50% but we are in "Pressure" state
+            bool wantBuff = hpPercent > 0.4f && _pressureScore > 5f; 
+
+            // 1. Check Held Item
             if (_c.CurrentHoldItemAgent != null)
             {
                 var item = _c.CurrentHoldItemAgent.Item;
-                if (item.GetComponent<Drug>() != null || item.GetComponent<FoodDrink>() != null)
+                bool isDrug = item.GetComponent<Drug>() != null;
+                bool isFood = item.GetComponent<FoodDrink>() != null;
+                bool isBuff = item.GetComponent<Duckov.ItemUsage.AddBuff>() != null; // Explicit namespace to be safe
+
+                // Decision: Use if it matches our need
+                bool shouldUse = false;
+                if (needHealth && (isDrug || isFood)) shouldUse = true;
+                if (wantBuff && isBuff) shouldUse = true;
+                
+                // Fallback: If holding a medkit and desperate, use it even if just for small heal
+                if (hpPercent < 0.95f && (isDrug || isFood)) shouldUse = true;
+
+                if (shouldUse)
                 {
-                    // 2. If holding but not using, use it
                     bool reloading = _c.GetGun()?.IsReloading() ?? false;
                     if (!reloading && _healWaitTimer <= 0f) 
                     {
                         _c.UseItem(item);
-                        _healWaitTimer = 4.0f; // Assume ~4s for healing animation to be safe
+                        _healWaitTimer = 4.0f; // Assume ~4s for healing animation
                     }
                     return;
                 }
             }
 
-            // 4. Find best healing item
+            // 2. Find Best Item for Needs
             var inv = _c.CharacterItem?.Inventory; 
             if (inv == null) return;
             
             Item? bestItem = null;
-            int bestQuality = -1;
+            int bestScore = -1;
             
             foreach (var item in inv)
             {
                 if (item == null) continue;
-                bool isHeal = item.GetComponent<Drug>() != null || item.GetComponent<FoodDrink>() != null;
-                if (isHeal)
+                
+                var drug = item.GetComponent<Drug>();
+                var food = item.GetComponent<FoodDrink>();
+                var buff = item.GetComponent<Duckov.ItemUsage.AddBuff>();
+                
+                int score = 0;
+                
+                // Prioritize Healing if hurt
+                if (needHealth)
                 {
-                    // Prefer higher quality items (often better meds)
-                    if (item.Quality > bestQuality) 
-                    { 
-                        bestQuality = item.Quality; 
-                        bestItem = item; 
-                    }
+                    if (drug != null) score += (int)drug.healValue + item.Quality * 10;
+                    if (food != null) score += 5 + item.Quality * 5; // Food is lower prio than meds
+                }
+                
+                // Prioritize Buffs if under pressure and not dying
+                if (wantBuff)
+                {
+                    if (buff != null) score += 50 + item.Quality * 10;
+                }
+                
+                // If critical (<30%), prioritize BIG heals above all
+                if (hpPercent < 0.3f)
+                {
+                    if (drug != null) score += (int)drug.healValue * 2;
+                }
+
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestItem = item;
                 }
             }
             
-            if (bestItem != null)
+            if (bestItem != null && bestScore > 0)
             {
                 // Switch
                 if (_c.CurrentHoldItemAgent?.Item != bestItem)
@@ -639,8 +679,18 @@ namespace BloodMoon
                     // Score: Distance from us (closer is better to minimize travel time) + Flank Angle - Heat
                     float dist = Vector3.Distance(_c.transform.position, cand);
                     float heat = _store.GetHeatAt(cand, Time.time, 5f);
+                    
+                    // Prefer positions that provide cover (Raycast to target blocked?)
+                    // For flanking, we actually WANT LoS at the END, but travel path should be safe.
+                    // But 'cand' is the destination. We want a destination with Cover OR good LoS.
+                    
+                    // Simple Score: 
                     float score = 100f - dist - (heat * 15f);
                     
+                    // Angle Bonus: Closer to 90 degrees is better
+                    float angleDiff = Mathf.Abs(90f - Mathf.Abs(angle));
+                    score += (45f - angleDiff);
+
                     if (score > bestScore)
                     {
                         // Check if reachable (navmesh/raycast check roughly)

@@ -39,33 +39,7 @@ namespace BloodMoon
         private float _charactersRescanCooldown;
         private List<MonoBehaviour> _disabledSpawners = new List<MonoBehaviour>();
 
-        private float _estimatedMapRadius = 150f;
 
-        private void RecalculateMapMetrics()
-        {
-            if (_pointsCache.Count == 0) return;
-            
-            Vector3 min = new Vector3(float.MaxValue, 0, float.MaxValue);
-            Vector3 max = new Vector3(float.MinValue, 0, float.MinValue);
-            bool any = false;
-
-            foreach (var p in _pointsCache)
-            {
-                if (p == null) continue;
-                Vector3 pos = p.transform.position;
-                min = Vector3.Min(min, pos);
-                max = Vector3.Max(max, pos);
-                any = true;
-            }
-            
-            if (any)
-            {
-                float sizeX = Mathf.Abs(max.x - min.x);
-                float sizeZ = Mathf.Abs(max.z - min.z);
-                _estimatedMapRadius = Mathf.Max(sizeX, sizeZ) * 0.5f;
-                _estimatedMapRadius = Mathf.Clamp(_estimatedMapRadius, 80f, 800f); // Allow for very large maps
-            }
-        }
 
         private void DisableVanillaAI(CharacterMainControl c)
         {
@@ -204,8 +178,8 @@ namespace BloodMoon
                     }
                     if (!_processed.Contains(c))
                     {
-                        EnhanceBoss(c).Forget();
-                        SetupBossLocation(c);
+                        EnhanceBoss(c);
+                        // SetupBossLocation(c); // Removed
                         EnableRevenge(c, player);
                         SpawnMinionsForBoss(c, c.transform.position, c.gameObject.scene.buildIndex).Forget();
                         _processed.Add(c);
@@ -232,7 +206,10 @@ namespace BloodMoon
             if (boss == null) return;
 
             var minionPresets = GameplayDataSettings.CharacterRandomPresetData.presets
-                .Where(p => p != null && p.GetCharacterIcon() != GameplayDataSettings.UIStyle.BossCharacterIcon)
+                .Where(p => p != null && 
+                       p.GetCharacterIcon() != GameplayDataSettings.UIStyle.BossCharacterIcon &&
+                       p.GetCharacterIcon() != GameplayDataSettings.UIStyle.MerchantCharacterIcon &&
+                       p.GetCharacterIcon() != GameplayDataSettings.UIStyle.PetCharacterIcon)
                 .ToList();
 
             if (minionPresets.Count == 0) return;
@@ -244,10 +221,22 @@ namespace BloodMoon
             {
                  var preset = minionPresets[UnityEngine.Random.Range(0, minionPresets.Count)];
                  
-                 var offset = UnityEngine.Random.insideUnitCircle * UnityEngine.Random.Range(3f, 8f);
-                 var spawnPos = anchor + new Vector3(offset.x, 0, offset.y);
+                // Random Spawn Point Logic (Using Cache directly without custom filters)
+                 Vector3 spawnPos = anchor; 
+                 if (_pointsCache.Count > 0)
+                 {
+                     var pt = _pointsCache[UnityEngine.Random.Range(0, _pointsCache.Count)];
+                     if (pt != null) spawnPos = pt.GetRandomPoint();
+                 }
+                 else
+                 {
+                     // Fallback to simple offset if no points
+                     var offset = UnityEngine.Random.insideUnitCircle * UnityEngine.Random.Range(3f, 8f);
+                     spawnPos = anchor + new Vector3(offset.x, 0, offset.y);
+                 }
                  
-                 if (UnityEngine.AI.NavMesh.SamplePosition(spawnPos, out var hit, 5f, UnityEngine.AI.NavMesh.AllAreas))
+                 // Basic ground check for safety
+                 if (UnityEngine.AI.NavMesh.SamplePosition(spawnPos, out var hit, 10f, UnityEngine.AI.NavMesh.AllAreas))
                  {
                      spawnPos = hit.position;
                  }
@@ -263,25 +252,21 @@ namespace BloodMoon
                      {
                          await UniTask.Delay(100); 
                          if (clone == null) continue;
+                         var charItem = clone.CharacterItem;
+                         if (charItem == null) continue;
 
                          DisableVanillaAI(clone);
                          
-                         Multiply(clone.CharacterItem, "WalkSpeed", 1.2f);
-                         Multiply(clone.CharacterItem, "RunSpeed", 1.2f);
-                         await EquipArmorLevel(clone, 6);
-                         BoostDefense(clone.CharacterItem, false);
-                         // Give minions some meds too!
-                         await EnsureMedicalSupplies(clone, 2); 
-                        await EnsureMinionWeapon(clone);
-                        await EquipMeleeWeaponLevel(clone, 5);
-                        await FillHighAmmo(clone, 5);
-                         await EnsureGunLoaded(clone);
+                         Multiply(charItem, "WalkSpeed", 1.2f);
+                         Multiply(charItem, "RunSpeed", 1.2f);
                          
-                         var mh = clone.CharacterItem.GetStat("MaxHealth".GetHashCode());
+                         BoostDefense(charItem, false);
+                         
+                         var mh = charItem.GetStat("MaxHealth".GetHashCode());
                          if (mh != null) mh.BaseValue *= ModConfig.Instance.MinionHealthMultiplier;
                          clone.Health.SetHealth(clone.Health.MaxHealth);
                          
-                         var mw = clone.CharacterItem.GetStat("MaxWeight".GetHashCode());
+                         var mw = charItem.GetStat("MaxWeight".GetHashCode());
                          if (mw != null) mw.BaseValue = 1000f;
                          clone.UpdateWeightState();
                          clone.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
@@ -360,7 +345,7 @@ namespace BloodMoon
             }
         }
 
-        private async UniTask EnhanceBoss(CharacterMainControl c)
+        private void EnhanceBoss(CharacterMainControl c)
         {
             // IMMEDIATELY disable vanilla AI to prevent logic conflict during async setup
             DisableVanillaAI(c);
@@ -378,17 +363,6 @@ namespace BloodMoon
                 var mw = item.GetStat("MaxWeight".GetHashCode());
                 if (mw != null) mw.BaseValue = 1000f;
                 
-                // Ensure backpack is equipped first to provide space
-                await EquipTopArmor(c);
-                
-                // PRIORITY: Ensure Medical Supplies BEFORE Ammo fills the bag
-                await EnsureMedicalSupplies(c, 4);
-
-                await EnsureTwoGuns(c);
-                await EquipMeleeWeaponLevel(c, 6);
-                await FillBestAmmo(c);
-                await EnsureGunLoaded(c);
-                
                 c.Health.SetHealth(c.Health.MaxHealth);
                 c.UpdateWeightState();
                 c.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
@@ -403,10 +377,6 @@ namespace BloodMoon
                 }
                 if (c.Team != Teams.wolf) c.SetTeam(Teams.wolf);
                 if (ModConfig.Instance.EnableBossGlow) AddBossGlow(c);
-                
-                // Adjust supplies based on backpack status - Dynamic High Value Selection
-                await EnsureProvisions(c);
-                await AddHighValueLoot(c);
             }
             catch (System.Exception e)
             {
@@ -458,115 +428,14 @@ namespace BloodMoon
             if (s != null) s.BaseValue *= m;
         }
 
-        private async System.Threading.Tasks.Task EquipBestItemByTag(CharacterMainControl c, string tag, int minVal)
+
+
+
+
+        private void EnableRevenge(CharacterMainControl c, CharacterMainControl? player)
         {
-             var ids = ItemSelector.GetBestItemsByTags(new[] { tag }, 1, minValue: minVal);
-             if (ids.Count == 0)
-             {
-                 var t = TagUtilities.TagFromString(tag);
-                 if (t != null)
-                 {
-                     var filter = new ItemFilter { requireTags = new[] { t } };
-                     ids = ItemSelector.GetBestItems(filter, 1);
-                 }
-             }
+            if (player == null) return;
 
-             if (ids.Count > 0)
-             {
-                var item = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(ids[0]);
-                if (item != null)
-                {
-                    if (!c.CharacterItem.TryPlug(item, emptyOnly: true)) item.DestroyTree();
-                }
-             }
-        }
-
-        private async System.Threading.Tasks.Task EquipTopArmor(CharacterMainControl c)
-        {
-            await EquipBestItemByTag(c, "Helmat", 10);
-            await EquipBestItemByTag(c, "Armor", 10);
-            await EquipBestBackpack(c);
-        }
-
-        private async System.Threading.Tasks.Task EquipMeleeWeaponLevel(CharacterMainControl c, int level)
-        {
-            await EquipBestItemByTag(c, "MeleeWeapon", 10);
-        }
-
-        private async System.Threading.Tasks.Task EnsureTwoGuns(CharacterMainControl c)
-        {
-            // High Value Guns
-            var tags = new List<Tag> { GameplayDataSettings.Tags.Gun };
-            var filter = new ItemFilter {
-                requireTags = tags.ToArray(),
-                excludeTags = new Tag[] { TagUtilities.TagFromString("GunType_PST") }
-            };
-            var guns = ItemSelector.GetBestItems(filter, 10, minValue: 100); // Get top 10 to pick from
-
-            Item? prim = c.PrimWeaponSlot()?.Content;
-            Item? sec = c.SecWeaponSlot()?.Content;
-            
-            if (guns.Count > 0)
-            {
-                if (prim == null)
-                {
-                    var id = guns[UnityEngine.Random.Range(0, Mathf.Min(3, guns.Count))];
-                    prim = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
-                    if (prim != null)
-                    {
-                        if (!c.CharacterItem.TryPlug(prim, emptyOnly: true)) prim.DestroyTree();
-                    }
-                }
-                if (sec == null && guns.Count > 1)
-                {
-                    var id = guns[UnityEngine.Random.Range(0, Mathf.Min(3, guns.Count))];
-                    // Ensure different gun if possible?
-                    sec = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
-                    if (sec != null)
-                    {
-                        if (!c.CharacterItem.TryPlug(sec, emptyOnly: true)) sec.DestroyTree();
-                    }
-                }
-                
-                // Replace Pistols if present
-                if (prim != null && prim.Tags.Contains("GunType_PST"))
-                {
-                    var id = guns[UnityEngine.Random.Range(0, Mathf.Min(3, guns.Count))];
-                    var rep = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
-                    if (rep != null)
-                    {
-                        if (!c.CharacterItem.TryPlug(rep, emptyOnly: false)) rep.DestroyTree();
-                    }
-                }
-                 if (sec != null && sec.Tags.Contains("GunType_PST"))
-                {
-                    var id = guns[UnityEngine.Random.Range(0, Mathf.Min(3, guns.Count))];
-                    var rep = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
-                    if (rep != null)
-                    {
-                        if (!c.CharacterItem.TryPlug(rep, emptyOnly: false)) rep.DestroyTree();
-                    }
-                }
-            }
-        }
-
-        private async System.Threading.Tasks.Task FillBestAmmo(CharacterMainControl c)
-        {
-            int count = HasBackpack(c) ? 8 : 2;
-            await FillAmmoForGunMultiple(c, c.PrimWeaponSlot()?.Content, 6, count);
-            await FillAmmoForGunMultiple(c, c.SecWeaponSlot()?.Content, 6, count);
-            PurgeNonMatchingAmmo(c);
-        }
-
-        private void SetupBossLocation(CharacterMainControl c)
-        {
-            if (!LevelManager.Instance || !LevelManager.Instance.IsRaidMap) return;
-            // Removed logic that forces bosses to player scene
-            GatherLeaderGroup(c);
-        }
-
-        private void EnableRevenge(CharacterMainControl c, CharacterMainControl player)
-        {
             var ai = c.GetComponent<AICharacterController>();
             if (ai != null)
             {
@@ -584,92 +453,8 @@ namespace BloodMoon
         }
 
 
-        private async System.Threading.Tasks.Task EnsureMedicalSupplies(CharacterMainControl c, int targetCount)
-        {
-            try
-            {
-                if (c == null || c.CharacterItem == null || c.CharacterItem.Inventory == null) return;
 
-                int existing = 0;
-                foreach(var it in c.CharacterItem.Inventory)
-                {
-                    if (it == null) continue;
-                    if (it.Tags.Contains("Food") || it.Tags.Contains("Drink") || it.GetComponent<Drug>() != null) existing++;
-                }
-                
-                int needed = targetCount - existing;
-                if (needed <= 0) return;
 
-                // "Medicine" tag is not standard. Using Food/Drink as reliable healing sources
-                var tags = new string[] { "Food", "Drink" };
-                var medIds = ItemSelector.GetBestItemsByTags(tags, 10, minValue: 10);
-                
-                if (medIds.Count == 0) return;
-                
-                for (int i = 0; i < needed; i++)
-                {
-                    int id = medIds[UnityEngine.Random.Range(0, Mathf.Min(5, medIds.Count))];
-                    var item = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
-                    if (item != null)
-                    {
-                        if (!c.CharacterItem.Inventory.AddItem(item))
-                        {
-                            item.DestroyTree();
-                            break;
-                        }
-                    }
-                }
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogError($"[BloodMoon] Medical Supply Error: {e}");
-            }
-        }
-        
-        private async System.Threading.Tasks.Task EnsureProvisions(CharacterMainControl c)
-        {
-             try
-             {
-                 // System supplement: Food/Drink - High Value
-                 // "Food" and "Drink" are valid tags. "Consumable" is not.
-                 var tags = new string[] { "Food", "Drink" };
-                 var items = BloodMoon.Utils.ItemSelector.GetBestItemsByTags(tags, 5, minValue: 5);
-                 if (items.Count == 0) return;
-                 
-                 // Add 1-2 provisions
-                 int count = UnityEngine.Random.Range(1, 3);
-                 for(int i=0; i<count; i++)
-                 {
-                     int id = items[UnityEngine.Random.Range(0, items.Count)];
-                     var item = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
-                     if (item != null)
-                     {
-                         if (!c.CharacterItem.Inventory.AddItem(item)) item.DestroyTree();
-                     }
-                 }
-             }
-             catch (System.Exception e)
-             {
-                 Debug.LogWarning($"[BloodMoon] EnsureProvisions Warning: {e.Message}");
-             }
-        }
-
-        private async System.Threading.Tasks.Task AddHighValueLoot(CharacterMainControl c)
-        {
-             // 1-2 random high value items
-             int count = UnityEngine.Random.Range(1, 3);
-             var filter = new ItemFilter { minQuality = 3 }; 
-             var ids = BloodMoon.Utils.ItemSelector.GetRandomHighValueItems(filter, count, minValue: 100); 
-             
-             foreach(var id in ids)
-             {
-                 var item = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
-                 if (item != null)
-                 {
-                     if (!c.CharacterItem.Inventory.AddItem(item)) item.DestroyTree();
-                 }
-             }
-        }
 
 
 
@@ -683,294 +468,13 @@ namespace BloodMoon
             if (head != null) head.BaseValue = Mathf.Max(head.BaseValue, headTarget);
         }
 
-        private async System.Threading.Tasks.Task EquipArmorLevel(CharacterMainControl c, int level)
-        {
-             // Ignore level, use High Value
-             await EquipBestItemByTag(c, "Helmat", 50);
-             await EquipBestItemByTag(c, "Armor", 50);
-             await EquipBestBackpack(c);
-        }
 
-        private async System.Threading.Tasks.Task EnsureMinionWeapon(CharacterMainControl c)
-        {
-            var prim = c.PrimWeaponSlot()?.Content;
-            
-            // If we already have a decent gun (not pistol), we are fine.
-            if (prim != null && prim.Tags.Contains(GameplayDataSettings.Tags.Gun) && !prim.Tags.Contains("GunType_PST"))
-            {
-                return;
-            }
 
-            var tags = new List<Tag> { GameplayDataSettings.Tags.Gun };
-            var filter = new ItemFilter {
-                requireTags = tags.ToArray(), 
-                minQuality = 0, // Lowered from 4 to allow basic guns
-                excludeTags = new Tag[] { TagUtilities.TagFromString("GunType_PST") }
-            };
-            
-            // Try to find decent guns first
-            var guns = ItemSelector.GetBestItems(filter, 10, minValue: 50);
-            
-            // Fallback: if no non-pistol guns found, try ANY gun including pistols
-            if (guns.Count == 0)
-            {
-                filter.excludeTags = null;
-                guns = ItemSelector.GetBestItems(filter, 10, minValue: 20);
-            }
-            
-            if (guns.Count <= 0) 
-            {
-                // Debug.LogWarning("[BloodMoon] No guns found for minion!");
-                return;
-            }
 
-            // Pick a random gun from the list
-            var id = guns[UnityEngine.Random.Range(0, Mathf.Min(3, guns.Count))];
-            var newGun = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
-            
-            if (newGun != null)
-            {
-                // If we have a pistol or nothing, replace/fill
-                // Using emptyOnly: false to force swap if needed
-                if (!c.CharacterItem.TryPlug(newGun, emptyOnly: false)) 
-                {
-                    newGun.DestroyTree();
-                }
-            }
-        }
 
-        private async System.Threading.Tasks.Task FillHighAmmo(CharacterMainControl c, int level)
-        {
-            int count = HasBackpack(c) ? 5 : 1;
-            await FillAmmoForGunMultiple(c, c.PrimWeaponSlot()?.Content, level, count);
-            await FillAmmoForGunMultiple(c, c.SecWeaponSlot()?.Content, level, count);
-            PurgeNonMatchingAmmo(c);
-        }
 
-        private async System.Threading.Tasks.Task FillAmmoForGun(CharacterMainControl c, Item? gun, int level)
-        {
-            if (gun == null) return;
-            var caliber = gun.Constants?.GetString("Caliber") ?? string.Empty;
-            if (string.IsNullOrEmpty(caliber)) return;
-            
-            var filter = new ItemFilter { caliber = caliber, requireTags = new Tag[] { GameplayDataSettings.Tags.Bullet } };
-            // High Value Ammo
-            var ids = ItemSelector.GetBestItems(filter, 5, minValue: 1); 
-            
-            if (ids.Count > 0)
-            {
-                var id = ids[0]; // Best ammo
-                var ammo = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
-                if (ammo != null)
-                {
-                    if (!c.CharacterItem.Inventory.AddItem(ammo))
-                    {
-                        ammo.DestroyTree();
-                    }
-                }
-            }
-        }
 
-        private async System.Threading.Tasks.Task FillAmmoForGunMultiple(CharacterMainControl c, Item? gun, int level, int targetCount)
-        {
-            if (gun == null || targetCount <= 0) return;
-            var inventory = c.CharacterItem?.Inventory;
-            if (inventory == null) return;
 
-            var caliber = gun.Constants?.GetString("Caliber") ?? string.Empty;
-            if (string.IsNullOrEmpty(caliber)) return;
-
-            int existing = 0;
-            foreach (var item in inventory)
-            {
-                if (item == null) continue;
-                if (item.Tags.Contains(GameplayDataSettings.Tags.Bullet))
-                {
-                    var cal = item.Constants?.GetString("Caliber");
-                    if (cal == caliber) existing++;
-                }
-            }
-
-            int needed = targetCount - existing;
-            if (needed <= 0) return;
-
-            var filter = new ItemFilter { caliber = caliber, requireTags = new Tag[] { GameplayDataSettings.Tags.Bullet } };
-            var ids = ItemSelector.GetBestItems(filter, 3, minValue: 1); 
-            if (ids.Count == 0) return;
-            
-            for (int i = 0; i < needed; i++)
-            {
-                int id = ids[UnityEngine.Random.Range(0, Mathf.Min(2, ids.Count))];
-                var ammo = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
-                if (ammo != null)
-                {
-                    if (!inventory.AddItem(ammo))
-                    {
-                        ammo.DestroyTree();
-                        break; 
-                    }
-                }
-            }
-        }
-
-        private async System.Threading.Tasks.Task EquipBestBackpack(CharacterMainControl c)
-        {
-            try
-            {
-                var tags = new List<Tag> { GameplayDataSettings.Tags.Backpack };
-                var filter = new ItemFilter { requireTags = tags.ToArray() };
-                var candidates = ItemSelector.GetBestItems(filter, 5, minValue: 50); // High value backpacks
-                
-                if (candidates.Count == 0) return; 
-
-                int backpackHash = "Backpack".GetHashCode();
-                var slot = c.CharacterItem.Slots.GetSlot(backpackHash);
-                var inv = c.CharacterItem.Inventory;
-
-                if (inv != null)
-                {
-                    var toRemove = new List<Item>();
-                    foreach (var it in inv)
-                    {
-                        if (it != null && it.Tags.Contains(GameplayDataSettings.Tags.Backpack))
-                        {
-                            toRemove.Add(it);
-                        }
-                    }
-                    for (int i = 0; i < toRemove.Count; i++) toRemove[i].DestroyTree();
-                }
-                if (slot != null && slot.Content != null)
-                {
-                    var unplugged = slot.Unplug();
-                    if (unplugged != null) unplugged.DestroyTree();
-                }
-
-                foreach (var id in candidates)
-                {
-                    var item = await BloodMoon.Utils.ItemInstantiateSafe.SafeInstantiateById(id);
-                    if (item == null) continue;
-                    
-                    if (item.Slots == null || item.Slots.Count == 0)
-                    {
-                        item.DestroyTree();
-                        continue;
-                    }
-
-                    if (slot != null && slot.CanPlug(item))
-                    {
-                        if (!slot.Plug(item, out var unpluggedItem))
-                        {
-                            item.DestroyTree();
-                            continue;
-                        }
-                        if (unpluggedItem != null)
-                        {
-                            if (inv == null || !inv.AddAndMerge(unpluggedItem)) unpluggedItem.DestroyTree();
-                        }
-                        return;
-                    }
-                    else
-                    {
-                        if (!c.CharacterItem.TryPlug(item, emptyOnly: false)) item.DestroyTree();
-                        else return;
-                    }
-                }
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogError($"[BloodMoon] EquipBestBackpack Error: {e}");
-            }
-        }
-
-        private bool HasBackpack(CharacterMainControl c)
-        {
-            if (c == null || c.CharacterItem == null || c.CharacterItem.Slots == null) return false;
-            var slot = c.CharacterItem.Slots.GetSlot("Backpack".GetHashCode());
-            return slot != null && slot.Content != null;
-        }
-
-        private async System.Threading.Tasks.Task EnsureGunLoaded(CharacterMainControl c)
-        {
-            await UniTask.Yield();
-            var g = c.GetGun();
-            var gs = g?.GunItemSetting;
-            var inv = c.CharacterItem?.Inventory;
-            if (gs != null && inv != null)
-            {
-                var caliber = g?.Item?.Constants?.GetString("Caliber") ?? string.Empty;
-                var best = GetBestAPBulletItem(inv, caliber);
-                if (best != null)
-                {
-                    gs.SetTargetBulletType(best);
-                }
-                else
-                {
-                    // Avoid AutoSetTypeInInventory if ID is invalid (-1) which causes ItemAssetCollection error
-                    // gs.AutoSetTypeInInventory(inv);
-                }
-                
-                // Safe load
-                try
-                {
-                    gs.LoadBulletsFromInventory(inv).Forget();
-                }
-                catch (System.Exception ex)
-                {
-                    // Suppress ItemID -1 errors
-                    if (!ex.Message.Contains("-1")) Debug.LogWarning($"[BloodMoon] LoadBullets Warning: {ex.Message}");
-                }
-                
-                PurgeNonMatchingAmmo(c);
-            }
-        }
-
-        private Item? GetBestAPBulletItem(Inventory? inv, string? caliber)
-        {
-            if (inv == null) return null;
-            float bestGain = -1f; Item? best = null;
-            int apHash = "ArmorPiercingGain".GetHashCode();
-            int calHash = "Caliber".GetHashCode();
-            foreach (var it in inv)
-            {
-                if (it == null) continue;
-                if (!it.Tags.Contains(GameplayDataSettings.Tags.Bullet)) continue;
-                string cal = it.Constants?.GetString(calHash) ?? string.Empty;
-                if (!string.IsNullOrEmpty(caliber) && cal != caliber) continue;
-                float gain = it.Constants?.GetFloat(apHash, 0f) ?? 0f;
-                if (gain > bestGain)
-                {
-                    bestGain = gain; best = it;
-                }
-            }
-            return best;
-        }
-
-        private void PurgeNonMatchingAmmo(CharacterMainControl c)
-        {
-            var inv = c.CharacterItem?.Inventory; if (inv == null) return;
-            var prim = c.PrimWeaponSlot()?.Content;
-            var sec = c.SecWeaponSlot()?.Content;
-            string? primCal = prim != null ? (prim.Constants?.GetString("Caliber") ?? string.Empty) : null;
-            string? secCal = sec != null ? (sec.Constants?.GetString("Caliber") ?? string.Empty) : null;
-            var toRemove = new List<Item>();
-            foreach (var it in inv)
-            {
-                if (it == null) continue;
-                if (!it.Tags.Contains(GameplayDataSettings.Tags.Bullet)) continue;
-                string cal = it.Constants?.GetString("Caliber") ?? string.Empty;
-                bool matchPrim = !string.IsNullOrEmpty(primCal) && cal == primCal;
-                bool matchSec = !string.IsNullOrEmpty(secCal) && cal == secCal;
-                if (!matchPrim && !matchSec)
-                {
-                    toRemove.Add(it);
-                }
-            }
-            for (int i = 0; i < toRemove.Count; i++)
-            {
-                var it = toRemove[i];
-                it.DestroyTree();
-            }
-        }
 
 
 
@@ -996,7 +500,9 @@ namespace BloodMoon
             }
             try
             {
-                int id = boss.GetInstanceID();
+                // Use Persistent ID (Preset Name) instead of transient InstanceID
+                string id = boss.characterPreset != null ? boss.characterPreset.name : boss.name;
+                
                 float armorBody = 0f;
                 var body = boss.CharacterItem?.GetStat("BodyArmor".GetHashCode());
                 if (body != null) armorBody = body.BaseValue;
@@ -1024,123 +530,7 @@ namespace BloodMoon
             }
         }
 
-        private Vector3 GetOrCreateAnchor(CharacterMainControl boss, Vector3 fallbackCenter)
-        {
-            if (_groupAnchors.TryGetValue(boss, out var pos)) return pos;
-            
-            // Dynamic range based on map size
-            float minR = Mathf.Clamp(_estimatedMapRadius * 0.15f, 35f, 80f);
-            float maxR = Mathf.Clamp(_estimatedMapRadius * 0.6f, 120f, 400f);
-            
-            // Collect existing anchors to avoid overlap
-            var avoid = _groupAnchors.Values.ToList();
-            
-            if (!TryGetSeparatedMapPoint(fallbackCenter, minR, maxR, avoid, 40f, out pos))
-            {
-                // Retry with larger range for big maps or tighter constraints
-                if (!TryGetSeparatedMapPoint(fallbackCenter, minR, maxR * 1.5f, avoid, 30f, out pos))
-                {
-                     pos = GetSpawnPointOrFallback(fallbackCenter, avoid);
-                }
-            }
-            _groupAnchors[boss] = pos;
-            return pos;
-        }
 
-        private Vector3 GetSpawnPointOrFallback(Vector3 fallback) => GetSpawnPointOrFallback(fallback, new List<Vector3>());
-        
-        private Vector3 GetSpawnPointOrFallback(Vector3 fallback, List<Vector3> avoid)
-        {
-            float minR = Mathf.Clamp(_estimatedMapRadius * 0.15f, 35f, 60f);
-            float maxR = Mathf.Clamp(_estimatedMapRadius * 0.6f, 120f, 400f);
-
-            // 1. Standard range
-            if (TryGetSeparatedMapPoint(fallback, minR, maxR, avoid, 40f, out var p)) return p;
-            
-            // 2. Extended range
-            if (TryGetSeparatedMapPoint(fallback, minR, maxR * 1.5f, avoid, 30f, out p)) return p;
-            
-            // 3. Desperate Map Search: Ignore min range if far enough from avoid, or just find ANY valid point far from player
-            if (TryGetSeparatedMapPoint(fallback, 20f, 9999f, avoid, 20f, out p)) return p;
-
-            // 4. Fallback to player relative logic (Procedural search)
-            var result = fallback;
-            var player = CharacterMainControl.Main;
-            if (player != null)
-            {
-                var playerPos = player.transform.position;
-                float pMinR = 35f;
-                float pMaxR = 55f;
-                
-                // Try multiple angles to find a valid spot
-                for (int i = 0; i < 20; i++)
-                {
-                    // Random angle
-                    float angle = UnityEngine.Random.Range(0f, 360f);
-                    Vector3 dir = Quaternion.Euler(0, angle, 0) * Vector3.forward;
-                    
-                    // Bias towards behind player for first few attempts
-                    if (i < 5)
-                    {
-                        Vector3 back = -player.transform.forward;
-                        dir = Vector3.Slerp(back, dir, 0.5f).normalized;
-                    }
-
-                    float r = UnityEngine.Random.Range(pMinR, pMaxR);
-                    var candidate = playerPos + dir * r;
-                    
-                    // Validate Ground
-                    if (Physics.Raycast(candidate + Vector3.up * 5f, Vector3.down, out var hit, 10f, GameplayDataSettings.Layers.groundLayerMask))
-                    {
-                        candidate = hit.point;
-                        
-                        // Validate Line of Sight (FOW)
-                        var mask = GameplayDataSettings.Layers.fowBlockLayers;
-                        var from = playerPos + Vector3.up * 1.6f;
-                        var to = candidate + Vector3.up * 1.2f;
-                        var checkDir = to - from;
-                        
-                        // If we hit something (wall), it's a good hiding spot -> valid
-                        // If we DON'T hit anything, line of sight is clear -> might spawn in plain sight (bad but acceptable if desperate)
-                        // Actually, we prefer NOT to spawn in plain sight.
-                        // But finding a valid navmesh/ground point is higher priority than hiding.
-                        
-                        // Check distance from other bosses
-                        bool conflict = false;
-                        foreach(var av in avoid)
-                        {
-                             if ((av - candidate).sqrMagnitude < 900f) // 30m * 30m
-                             {
-                                 conflict = true; break;
-                             }
-                        }
-                        if (conflict) continue;
-
-                        result = candidate;
-                        return result; // Found a good spot
-                    }
-                }
-            }
-            
-            // 5. If everything fails, return fallback (Player Pos) BUT log warning
-            // Ideally we should move it slightly if it's exactly player pos
-            if ((result - fallback).sqrMagnitude < 225f) // 15m * 15m check
-            {
-                Debug.LogWarning("[BloodMoon] Could not find spawn point. Forcing safe offset.");
-                // Try to find a point at least 25m away
-                var offset = (result - fallback).normalized;
-                if (offset == Vector3.zero) offset = Vector3.forward;
-                result = fallback + offset * 25f;
-                
-                // Final safety: Put it on ground
-                if (Physics.Raycast(result + Vector3.up * 10f, Vector3.down, out var hit, 20f, GameplayDataSettings.Layers.groundLayerMask))
-                {
-                    result = hit.point;
-                }
-            }
-            
-            return result;
-        }
 
         
 
@@ -1152,118 +542,9 @@ namespace BloodMoon
 
         
 
-        private void GatherLeaderGroup(CharacterMainControl boss)
-        {
-            if (!_groupAnchors.TryGetValue(boss, out var anchor)) anchor = boss.transform.position;
-            
-            // Optimization: Use cached characters
-            var controllers = new List<AICharacterController>();
-            foreach(var c in _charactersCache) {
-                if (c == null) continue;
-                var ai = c.GetComponent<AICharacterController>();
-                if (ai != null) controllers.Add(ai);
-            }
 
-            int scene = MultiSceneCore.MainScene.HasValue ? MultiSceneCore.MainScene.Value.buildIndex : boss.gameObject.scene.buildIndex;
-            foreach (var ai in controllers)
-            {
-                if (ai == null) continue;
-                if (ai.leader == boss)
-                {
-                    var ch = ai.GetComponent<CharacterMainControl>();
-                    if (ch == null) continue;
-                    var offset2D = Random.insideUnitCircle.normalized * UnityEngine.Random.Range(2.5f, 6f);
-                    var pos = anchor + new Vector3(offset2D.x, 0f, offset2D.y);
-                    ch.SetRelatedScene(scene);
-                    // Force navmesh position to prevent invalid placement
-                    if (UnityEngine.AI.NavMesh.SamplePosition(pos, out var hit, 5f, UnityEngine.AI.NavMesh.AllAreas))
-                    {
-                        ch.SetPosition(hit.position);
-                    }
-                    else
-                    {
-                        ch.SetPosition(pos);
-                    }
-                }
-            }
-            AssignWingIndicesForLeader(boss);
-        }
 
-        private bool TryGetRandomMapPoint(Vector3 center, float minRange, float maxRange, out Vector3 pos)
-        {
-            return TryGetSeparatedMapPoint(center, minRange, maxRange, null, 0f, out pos);
-        }
 
-        private bool TryGetSeparatedMapPoint(Vector3 center, float minRange, float maxRange, List<Vector3>? avoidPoints, float avoidRadius, out Vector3 pos)
-        {
-            pos = Vector3.zero;
-            if (_pointsCache != null && _pointsCache.Count > 0)
-            {
-                // Filter points within range
-                var candidates = new List<Points>();
-                float sqrMin = minRange * minRange;
-                float sqrMax = maxRange * maxRange;
-                foreach (var p in _pointsCache)
-                {
-                    if (p == null) continue;
-                    float d2 = Vector3.SqrMagnitude(p.transform.position - center);
-                    if (d2 >= sqrMin && d2 <= sqrMax)
-                    {
-                        candidates.Add(p);
-                    }
-                }
-
-                if (candidates.Count > 0)
-                {
-                    // Best Candidate Sampling for Uniform Distribution
-                    int attempts = 15;
-                    Vector3 bestCandidate = Vector3.zero;
-                    float bestScore = -1f;
-
-                    for (int i = 0; i < attempts; i++)
-                    {
-                        var p = candidates[UnityEngine.Random.Range(0, candidates.Count)];
-                        var candidatePos = p.GetRandomPoint();
-                        if (Vector3.Distance(candidatePos, center) < minRange) continue;
-
-                        // Calculate score based on separation
-                        float score = 1000f;
-                        bool valid = true;
-                        
-                        if (avoidPoints != null && avoidPoints.Count > 0)
-                        {
-                            float minSep = float.MaxValue;
-                            foreach(var ap in avoidPoints)
-                            {
-                                float dist = Vector3.Distance(candidatePos, ap);
-                                if (dist < avoidRadius) { valid = false; break; }
-                                if (dist < minSep) minSep = dist;
-                            }
-                            if (!valid) continue;
-                            score = minSep; // Prefer farthest from others
-                        }
-
-                        if (score > bestScore)
-                        {
-                            // Verify ground
-                            var ray = new Ray(candidatePos + Vector3.up * 1.5f, Vector3.down);
-                            if (Physics.Raycast(ray, out var hit, 5.0f, GameplayDataSettings.Layers.groundLayerMask))
-                            {
-                                bestScore = score;
-                                bestCandidate = hit.point;
-                            }
-                        }
-                    }
-
-                    if (bestScore >= 0f)
-                    {
-                        pos = bestCandidate;
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
 
 
         public void StartSceneSetupParallel()
@@ -1287,40 +568,43 @@ namespace BloodMoon
             _bloodMoonActive = true;
             _strategyDecayTimer = 30f;
 
-            // --- Synchronous Initialization Phase ---
-            // Immediately capture and disable vanilla spawners to prevent interference
-            _pointsCache.Clear();
-            _disabledSpawners.Clear();
-
-            // 1. Capture Points & Limit Native Spawners (Do not disable)
-            var spawners = UnityEngine.Object.FindObjectsOfType<RandomCharacterSpawner>();
-            foreach (var s in spawners) 
-            { 
-                if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints);
-                // Limit quantity to avoid overcrowding
-                // s.spawnCountRange = new Vector2Int(1, 1);
-            }
-            
-            var waveSpawners = UnityEngine.Object.FindObjectsOfType<WaveCharacterSpawner>();
-            foreach (var s in waveSpawners) 
-            { 
-                if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints);
-                // Limit quantity to avoid overcrowding
-                // s.spawnCountRange = new Vector2Int(1, 1);
-            }
-
-            // -----------------------------------
-
-            // 2. Initial Map Metrics Calculation
-            RecalculateMapMetrics();
-            
-            // 3. Initial Disable of any pre-existing vanilla AI
-            _charactersCache.Clear();
-            _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
-            // DisableVanillaControllersCached();
-
             UniTask.Void(async () =>
             {
+                await UniTask.Yield();
+
+                // --- Synchronous Initialization Phase ---
+                // Immediately capture and disable vanilla spawners to prevent interference
+                _pointsCache.Clear();
+                _disabledSpawners.Clear();
+
+                // 1. Capture Points & Limit Native Spawners (Do not disable)
+                var spawners = UnityEngine.Object.FindObjectsOfType<RandomCharacterSpawner>();
+                foreach (var s in spawners) 
+                { 
+                    if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints);
+                    // Limit quantity to avoid overcrowding
+                    // s.spawnCountRange = new Vector2Int(1, 1);
+                }
+                
+                await UniTask.Yield();
+
+                var waveSpawners = UnityEngine.Object.FindObjectsOfType<WaveCharacterSpawner>();
+                foreach (var s in waveSpawners) 
+                { 
+                    if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints);
+                    // Limit quantity to avoid overcrowding
+                    // s.spawnCountRange = new Vector2Int(1, 1);
+                }
+
+                // -----------------------------------
+
+                // 2. Initial Map Metrics Calculation
+                // RecalculateMapMetrics(); // Removed
+                
+                // 3. Initial Disable of any pre-existing vanilla AI
+                _charactersCache.Clear();
+                _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
+                // DisableVanillaControllersCached();
                 try 
                 {
                     if (CharacterMainControl.Main == null) await UniTask.WaitUntil(() => CharacterMainControl.Main != null);
@@ -1384,78 +668,69 @@ namespace BloodMoon
                             int targetScene = availableScenes[sceneCursor % availableScenes.Count];
                             sceneCursor++;
 
-                            var avoid = _groupAnchors.Values.ToList();
+                            // Use default behavior (Vector3.zero usually implies random/default spawn point in CreateCharacterAsync if supported, 
+                            // but CreateCharacterAsync usually requires a position. 
+                            // However, the user request says "Official system determines location". 
+                            // If we pass Vector3.zero, it might spawn at (0,0,0). 
+                            // But CharacterRandomPreset.CreateCharacterAsync typically takes a position.
+                            // If we want "Official System", we might need to find a valid random point using Game's own utility or just use one of the Points we found earlier without custom logic.
+                            // Actually, the user says "Delete our mod's code and logic for interfering with enemy position".
+                            // This implies we should just pick a valid random spawn point from the map's defined points (which is what the official system would do) 
+                            // OR just pass a simple point and let the navmesh/game handle it.
+                            // Since `CreateCharacterAsync` REQUIRES a position, we must provide one.
+                            // The "Official System" for random spawns usually picks a `Points` object.
+                            // So we will just pick a random `Points` from `_pointsCache` and use its position, removing all our custom "Search/Filter/Avoid/Fallback" logic.
                             
-                            // Try to find a random point in target scene
                             Vector3 anchor = Vector3.zero;
                             bool found = false;
                             
-                            // Filter points for target scene
-                            var scenePoints = _pointsCache.Where(p => p != null && p.gameObject.scene.buildIndex == targetScene).ToList();
-                            if (scenePoints.Count > 0)
+                            // Simple Random Pick from Cache
+                            if (_pointsCache.Count > 0)
                             {
-                                // Try 10 times to find a valid spot
-                                for(int k=0; k<10; k++)
+                                var pt = _pointsCache[UnityEngine.Random.Range(0, _pointsCache.Count)];
+                                if (pt != null)
                                 {
-                                    var pt = scenePoints[UnityEngine.Random.Range(0, scenePoints.Count)];
-                                    var cand = pt.GetRandomPoint();
-                                    // Basic distance check against other bosses
-                                    bool farEnough = true;
-                                    foreach(var av in avoid)
-                                    {
-                                        if(Vector3.Distance(cand, av) < 40f) { farEnough = false; break; }
-                                    }
-                                    if(farEnough)
-                                    {
-                                        if (Physics.Raycast(cand + Vector3.up * 2f, Vector3.down, out var hit, 5f, GameplayDataSettings.Layers.groundLayerMask))
-                                        {
-                                            anchor = hit.point;
-                                            found = true;
-                                            break;
-                                        }
-                                    }
+                                    anchor = pt.GetRandomPoint();
+                                    targetScene = pt.gameObject.scene.buildIndex;
+                                    found = true;
                                 }
                             }
                             
                             if (!found)
-                {
-                    anchor = GetSpawnPointOrFallback(player.transform.position, avoid);
-                    targetScene = scene; // Fallback to main scene if custom placement failed
-                }
-                
-                try
-                {
-                    var clone = await preset.CreateCharacterAsync(anchor, Vector3.forward, targetScene, null, false);
-                    if (clone != null)
-                    {
-                        // Wait longer to ensure full initialization (Animator, MagicBlend, etc.)
-                        // KINEMATION MagicBlend requires Animator to be ready. 
-                        // Wait until next frame or longer to avoid ArgumentNullException in PlayableHandle
-                        await UniTask.Yield(PlayerLoopTiming.Update); 
-                        await UniTask.Delay(1000); 
-                        
-                        if (clone == null) continue; // Check if destroyed during wait
-                        
-                        // Verify Animator before proceeding
-                        var anim = clone.GetComponent<Animator>();
-                        if (anim == null || !anim.isInitialized)
-                        {
-                             // Force simple wait if animator is lagging
-                             await UniTask.Delay(500);
-                        }
+                            {
+                                // Fallback if no points cache (unlikely in raid)
+                                if (player != null) anchor = player.transform.position; 
+                            }
+                            
+                            try
+                            {
+                                var clone = await preset.CreateCharacterAsync(anchor, Vector3.forward, targetScene, null, false);
+                                if (clone != null)
+                                {
+                                    // Wait longer to ensure full initialization (Animator, MagicBlend, etc.)
+                                    await UniTask.Yield(PlayerLoopTiming.Update); 
+                                    await UniTask.Delay(1000); 
+                                    
+                                    if (clone == null) continue; 
+                                    
+                                    var anim = clone.GetComponent<Animator>();
+                                    if (anim == null || !anim.isInitialized)
+                                    {
+                                         await UniTask.Delay(500);
+                                    }
 
-                        EnhanceBoss(clone).Forget();
-                        EnableRevenge(clone, player);
-                        SpawnMinionsForBoss(clone, anchor, targetScene).Forget();
-                        _processed.Add(clone);
-                        _groupAnchors[clone] = anchor;
-                        _charactersCache.Add(clone);
-                    }
-                }
-                catch (System.Exception ex)
-                {
-                    Debug.LogError($"[BloodMoon] Create Boss Error: {ex}");
-                }
+                                    EnhanceBoss(clone);
+                                    EnableRevenge(clone, player);
+                                    SpawnMinionsForBoss(clone, anchor, targetScene).Forget();
+                                    _processed.Add(clone);
+                                    _groupAnchors[clone] = anchor;
+                                    _charactersCache.Add(clone);
+                                }
+                            }
+                            catch (System.Exception ex)
+                            {
+                                Debug.LogError($"[BloodMoon] Create Boss Error: {ex}");
+                            }
             }
         }
 
