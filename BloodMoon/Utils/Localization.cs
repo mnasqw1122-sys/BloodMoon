@@ -12,6 +12,9 @@ namespace BloodMoon.Utils
                     { "Event_Incoming", "血月来临时间" },
                     { "Event_Active", "血月持续时间" },
                     { "Boss_Revenge", "我要你死无葬身之地" },
+                    { "Boss_Taunt_1", "你的死期到了" },
+                    { "Boss_Taunt_2", "血月将吞噬一切" },
+                    { "Boss_Taunt_3", "没人能活着离开" },
                     { "UI_Format", "{0} {1}" }
                 }
             },
@@ -21,6 +24,9 @@ namespace BloodMoon.Utils
                     { "Event_Incoming", "Blood Moon In" },
                     { "Event_Active", "Blood Moon Ends" },
                     { "Boss_Revenge", "I will hunt you down!" },
+                    { "Boss_Taunt_1", "Your time has come!" },
+                    { "Boss_Taunt_2", "The Blood Moon devours all!" },
+                    { "Boss_Taunt_3", "None shall escape!" },
                     { "UI_Format", "{0} {1}" }
                 }
             }

@@ -157,10 +157,16 @@ namespace BloodMoon
                 _aiTickTimer = 0f;
                 _context.UpdateSensors();
                 
+                // Update action time for current action
+                if (_currentAction != null)
+                {
+                    _currentAction.UpdateActionTime(AI_TICK_INTERVAL);
+                }
+                
                 // Cooldowns (Update based on interval)
                 foreach (var a in _actions) a.UpdateCooldown(AI_TICK_INTERVAL);
                 
-                // Decision Logic
+                // Decision Logic with behavior persistence
                 AIAction? bestAction = null;
                 float bestScore = -1f;
                 
@@ -174,7 +180,31 @@ namespace BloodMoon
                     }
                 }
                 
+                bool shouldSwitchAction = false;
+                
                 if (bestAction != null && bestAction != _currentAction)
+                {
+                    // Check if current action can be interrupted
+                    if (_currentAction == null || _currentAction.CanBeInterrupted())
+                    {
+                        // Only switch if the new action is significantly better
+                        // This prevents frequent switching between similar-scoring actions
+                        float currentScore = _currentAction?.Evaluate(_context) ?? -1f;
+                        float scoreDifference = bestScore - currentScore;
+                        
+                        // Require a minimum score difference to switch actions
+                        const float MIN_SCORE_DIFFERENCE = 0.1f;
+                        shouldSwitchAction = scoreDifference > MIN_SCORE_DIFFERENCE;
+                    }
+                }
+                
+                // Check if current action should exit
+                if (_currentAction != null && _currentAction.ShouldExit())
+                {
+                    shouldSwitchAction = true;
+                }
+                
+                if (shouldSwitchAction && bestAction != null)
                 {
                     if (_currentAction != null) _currentAction.OnExit(_context);
                     _currentAction = bestAction;
@@ -347,7 +377,25 @@ namespace BloodMoon
                  if (MoveToCover()) 
                  {
                      _c.SetRunInput(true); // Run to cover!
+                     
+                     // Defensive Fire: Shoot back while running if possible!
+                     if (_context.Target != null && _context.HasLoS)
+                     {
+                         _c.SetAimPoint(_context.Target.transform.position + Vector3.up * 1.2f);
+                         _c.Trigger(true, true, false);
+                     }
+                     
                      return; // Don't heal yet, just run
+                 }
+                 else
+                 {
+                     // Failed to find cover AND we are exposed.
+                     // Do NOT stop to heal in the open if enemy is looking at us.
+                     if (_context.HasLoS)
+                     {
+                         // Abort healing attempt to allow Engage/Panic to take over next frame
+                         return; 
+                     }
                  }
             }
             
@@ -521,6 +569,9 @@ namespace BloodMoon
             ChooseWeapon(dist);
 
             // Weapon Type Logic
+            var currentHold = _c.CurrentHoldItemAgent;
+            bool isMelee = currentHold is ItemAgent_MeleeWeapon;
+
             var gun = _c.GetGun();
             bool isSniper = gun != null && gun.BulletDistance > 80f; // Heuristic
             bool isShotgun = gun != null && gun.BulletCount < 10 && gun.BulletDistance < 20f; // Heuristic
@@ -530,6 +581,30 @@ namespace BloodMoon
             
             // Movement during combat (Strafing)
             Vector3 dir = _context.DirToTarget;
+
+            if (isMelee)
+            {
+                // Direct approach for melee
+                _c.movementControl.SetMoveInput(dir);
+                _c.SetRunInput(true);
+
+                // Attack if in range
+                var melee = _c.GetMeleeWeapon();
+                if (melee != null && melee.AttackableTargetInRange())
+                {
+                    _c.Attack();
+                }
+
+                // Random dash to close gap or dodge
+                if (dist > 5f && _dashCooldown <= 0f && Random.value < 0.02f)
+                {
+                    _c.Dash();
+                    _dashCooldown = Random.Range(2f, 4f);
+                }
+                
+                HandleDash();
+                return;
+            }
             
             _strafeTimer -= Time.deltaTime;
             if (_strafeTimer <= 0f)
@@ -901,13 +976,13 @@ namespace BloodMoon
         {
             if (_seeker == null) return (targetPos - _c.transform.position).normalized;
 
-            // Door / Stuck Check Logic (Check every 1.0s)
-            if (Time.time - _stuckCheckInterval > 1.0f)
+            // Door / Stuck Check Logic (Reduced frequency)
+            if (Time.time - _stuckCheckInterval > 2.0f) // Increased from 1.0f
             {
                 _stuckCheckInterval = Time.time;
                 if (Vector3.Distance(_c.transform.position, _lastDoorCheckPos) < 0.5f)
                 {
-                    _doorStuckTimer += 1.0f;
+                    _doorStuckTimer += 2.0f; // Increased from 1.0f
                 }
                 else
                 {
@@ -915,7 +990,7 @@ namespace BloodMoon
                     _lastDoorCheckPos = _c.transform.position;
                 }
 
-                if (_doorStuckTimer > 3.0f)
+                if (_doorStuckTimer > 6.0f) // Increased from 3.0f
                 {
                     _context.IsStuck = true; // Signal Unstuck Action
                     _doorStuckTimer = 0f;
@@ -925,64 +1000,194 @@ namespace BloodMoon
                 }
             }
 
+            // Simplified target validation
+            float distToTarget = Vector3.Distance(_c.transform.position, targetPos);
+            if (distToTarget > 100f) // Only validate if target is very far
+            {
+                // Target is too far, use simpler movement
+                return (targetPos - _c.transform.position).normalized;
+            }
+
             _repathTimer -= Time.deltaTime;
-            if (!_waitingForPath && (_path == null || _repathTimer <= 0f || Vector3.Distance(targetPos, _lastPathTarget) > 2.0f))
+            bool shouldRepath = false;
+            
+            // Reduced frequency of pathfinding
+            if (_path == null || !_path.vectorPath.Any() || _path.error)
+            {
+                shouldRepath = true;
+            }
+            else if (_repathTimer <= 0f)
+            {
+                shouldRepath = true;
+            }
+            else if (Vector3.Distance(targetPos, _lastPathTarget) > 3.0f) // Increased from 2.0f
+            {
+                shouldRepath = true;
+            }
+            // Simplified path validity check
+            else if (_path.vectorPath.Count > 0 && Vector3.Distance(_c.transform.position, _path.vectorPath[0]) > 15f) // Increased from 10f
+            {
+                shouldRepath = true;
+            }
+
+            if (shouldRepath && !_waitingForPath)
             {
                 _lastPathTarget = targetPos;
-                _repathTimer = 0.5f;
+                _repathTimer = 2.0f; // Increased from 1.0f to reduce pathfinding load
                 _waitingForPath = true;
                 _seeker.StartPath(_c.transform.position, targetPos, OnPathComplete);
             }
 
-            if (_path == null || _path.vectorPath == null || _path.vectorPath.Count == 0)
+            if (_path == null || _path.vectorPath == null || _path.vectorPath.Count == 0 || _path.error)
             {
-                // Fallback (Raycast avoidance)
-                 _wallCheckTimer -= Time.deltaTime;
+                // Enhanced fallback logic when pathfinding fails
+                _wallCheckTimer -= Time.deltaTime;
                 if (_wallCheckTimer <= 0f)
                 {
                     _wallCheckTimer = 0.1f;
                     var dir = (targetPos - _c.transform.position).normalized;
                     _cachedAvoidanceDir = dir;
-                    var origin = _c.transform.position + Vector3.up * 1.0f;
-                    var mask = GameplayDataSettings.Layers.wallLayerMask | GameplayDataSettings.Layers.halfObsticleLayer;
-                    if (Physics.Raycast(origin, dir, out var hit, 3.5f, mask))
+                    
+                    // Multiple raycasts for better obstacle detection
+                    var fallbackOrigin = _c.transform.position + Vector3.up * 1.0f;
+                    var fallbackMask = GameplayDataSettings.Layers.wallLayerMask | GameplayDataSettings.Layers.halfObsticleLayer;
+                    
+                    for (float angle = -30f; angle <= 30f; angle += 15f)
                     {
-                        var slide = Vector3.ProjectOnPlane(dir, hit.normal).normalized;
-                        if (Vector3.Dot(slide, dir) > 0.1f) _cachedAvoidanceDir = slide;
-                        else _cachedAvoidanceDir = Vector3.zero;
+                        var rayDir = Quaternion.AngleAxis(angle, Vector3.up) * dir;
+                        if (Physics.Raycast(fallbackOrigin, rayDir, out var hit, 3.5f, fallbackMask))
+                        {
+                            var slide = Vector3.ProjectOnPlane(rayDir, hit.normal).normalized;
+                            if (Vector3.Dot(slide, dir) > 0.1f)
+                            {
+                                _cachedAvoidanceDir = slide;
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            // No obstacle in this direction, use it
+                            _cachedAvoidanceDir = rayDir;
+                            break;
+                        }
                     }
                 }
-                return _cachedAvoidanceDir;
+                
+                // Add a small randomness to fallback direction to prevent infinite loops
+                Vector3 randomOffset = new Vector3(Random.insideUnitCircle.x, 0f, Random.insideUnitCircle.y) * 0.1f;
+                Vector3 finalDir = _cachedAvoidanceDir + randomOffset;
+                finalDir.y = 0;
+                return finalDir.normalized;
             }
 
-            // Follow Path
+            // Follow Path with improved waypoint handling
             float nextWaypointDistance = 3f;
             bool reachedEnd = false;
             float dist;
-            while (true)
+            
+            // Ensure we're not stuck on an invalid waypoint
+            while (_currentWaypoint < _path.vectorPath.Count)
             {
                 dist = Vector3.Distance(_c.transform.position, _path.vectorPath[_currentWaypoint]);
                 if (dist < nextWaypointDistance)
                 {
-                    if (_currentWaypoint + 1 < _path.vectorPath.Count)
+                    _currentWaypoint++;
+                    if (_currentWaypoint >= _path.vectorPath.Count)
                     {
-                        _currentWaypoint++;
-                        continue;
+                        reachedEnd = true;
+                        break;
                     }
-                    reachedEnd = true;
+                }
+                else
+                {
                     break;
                 }
-                break;
             }
 
-            if (reachedEnd)
+            // Prevent currentWaypoint from going out of bounds
+            _currentWaypoint = Mathf.Clamp(_currentWaypoint, 0, _path.vectorPath.Count - 1);
+
+            if (reachedEnd || _currentWaypoint >= _path.vectorPath.Count)
             {
                 if (Vector3.Distance(_c.transform.position, targetPos) > 1.5f)
+                {
+                    // Check if we're actually close to the target, if not, repath
+                    _repathTimer = 0f; // Force repath next cycle
                     return (targetPos - _c.transform.position).normalized;
+                }
                 return Vector3.zero;
             }
 
-            return (_path.vectorPath[_currentWaypoint] - _c.transform.position).normalized;
+            // Get direction to next waypoint
+            Vector3 dirToWaypoint = (_path.vectorPath[_currentWaypoint] - _c.transform.position).normalized;
+            
+            // Check if waypoint is reachable (simple raycast check)
+            var origin = _c.transform.position + Vector3.up * 1.0f;
+            var waypointPos = _path.vectorPath[_currentWaypoint] + Vector3.up * 1.0f;
+            var waypointDir = (waypointPos - origin).normalized;
+            var waypointDist = Vector3.Distance(origin, waypointPos);
+            
+            // If waypoint is blocked, try to find a better direction
+            var mask = GameplayDataSettings.Layers.wallLayerMask | GameplayDataSettings.Layers.halfObsticleLayer;
+            if (Physics.Raycast(origin, waypointDir, waypointDist, mask))
+            {
+                // Waypoint is blocked, try to slide around
+                var slide = Vector3.ProjectOnPlane(dirToWaypoint, Vector3.up).normalized;
+                if (Vector3.Dot(slide, dirToWaypoint) > 0.1f) dirToWaypoint = slide;
+            }
+
+            return dirToWaypoint;
+        }
+        
+        // Check if target position is valid for pathfinding
+        private bool IsValidTargetPosition(Vector3 pos)
+        {
+            // Check if position is on ground
+            if (!Physics.Raycast(pos + Vector3.up * 5f, Vector3.down, out var hit, 10f, GameplayDataSettings.Layers.groundLayerMask))
+            {
+                return false;
+            }
+            
+            // Check if position is too far from current position
+            if (Vector3.Distance(_c.transform.position, pos) > 100f)
+            {
+                return false;
+            }
+            
+            // Check if position is accessible (simple raycast check from above)
+            var mask = GameplayDataSettings.Layers.wallLayerMask | GameplayDataSettings.Layers.halfObsticleLayer;
+            if (Physics.Raycast(pos + Vector3.up * 5f, Vector3.down, 10f, mask))
+            {
+                return false;
+            }
+            
+            return true;
+        }
+        
+        // Find a nearby valid position when target is invalid
+        private Vector3 FindNearbyValidPosition(Vector3 originalPos)
+        {
+            // Try to find a valid position in a spiral pattern around the original
+            for (int i = 1; i <= 5; i++)
+            {
+                float radius = i * 5f;
+                int steps = i * 8;
+                
+                for (int j = 0; j < steps; j++)
+                {
+                    float angle = (float)j / steps * Mathf.PI * 2;
+                    Vector3 offset = new Vector3(Mathf.Cos(angle), 0, Mathf.Sin(angle)) * radius;
+                    Vector3 candidate = originalPos + offset;
+                    
+                    if (IsValidTargetPosition(candidate))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+            
+            // Fallback to current position if no valid nearby position found
+            return _c.transform.position + (_c.transform.forward * 5f);
         }
 
         private void OnPathComplete(Path p)
@@ -1168,6 +1373,9 @@ namespace BloodMoon
 
         private float GetPreferredDistance()
         {
+            var currentHold = _c.CurrentHoldItemAgent;
+            if (currentHold is ItemAgent_MeleeWeapon) return 1.5f;
+
             var gun = _c.GetGun();
             return gun != null ? Mathf.Clamp(gun.BulletDistance * 0.5f, 5f, 20f) : 5f;
         }
@@ -1264,21 +1472,52 @@ namespace BloodMoon
             var pos = _c.transform.position;
             float moved = (pos - _prevPos).magnitude;
             _prevPos = pos;
-            if (desired.sqrMagnitude < 0.04f) { _stuckTimer = 0f; return desired; }
             
-            if (moved < 0.02f)
+            // Reset stuck timer if we're not trying to move
+            if (desired.sqrMagnitude < 0.04f)
+            {
+                _stuckTimer = 0f;
+                _context.IsStuck = false;
+                return desired;
+            }
+            
+            // Check if we're actually trying to move but not succeeding
+            bool isTryingToMove = desired.magnitude > 0.1f;
+            bool isMoving = moved > 0.05f; // Increased from 0.02f for better detection
+            
+            if (isTryingToMove && !isMoving)
             {
                 _stuckTimer += Time.deltaTime;
-                if (_stuckTimer > 0.5f)
+                
+                // Only mark as stuck after persistent failure to move
+                if (_stuckTimer > 1.0f) // Increased from 0.5f to reduce false positives
                 {
-                    // Report stuck to context so Unstuck action can take over next frame
-                    _context.IsStuck = true; 
-                    return Quaternion.AngleAxis(90, Vector3.up) * desired;
+                    // Additional checks to prevent false stuck detection
+                    bool isExecutingStationaryAction = false;
+                    
+                    // Check if current action is something that requires stationary position
+                    if (_currentAction != null)
+                    {
+                        string actionName = _currentAction.Name;
+                        isExecutingStationaryAction = actionName == "Suppression" || actionName == "Engage" || actionName == "Heal";
+                    }
+                    
+                    // Don't mark as stuck if executing stationary actions
+                    if (!isExecutingStationaryAction)
+                    {
+                        _context.IsStuck = true; 
+                        
+                        // Smart unlock direction: try different angles instead of just 90 degrees
+                        float randomAngle = Random.Range(45f, 135f) * (Random.value > 0.5f ? 1f : -1f);
+                        return Quaternion.AngleAxis(randomAngle, Vector3.up) * desired;
+                    }
                 }
             }
             else
             {
+                // Reset stuck state if we're moving
                 _stuckTimer = 0f;
+                _context.IsStuck = false;
             }
             return desired;
         }
@@ -1314,7 +1553,14 @@ namespace BloodMoon
                 Vector3 selfPos = _c.transform.position;
                 int count = _all.Count;
                 
-                // Simple synchronous loop - much faster than Task overhead for small N
+                // Skip separation logic if there are too many AI (performance optimization)
+                if (count > 20)
+                {
+                    _sepCooldown = 0.2f; // Increase cooldown for large groups
+                    return desired;
+                }
+                
+                // AI-to-AI Separation (Most important part)
                 for (int i = 0; i < count; i++)
                 {
                     var other = _all[i];
@@ -1325,16 +1571,109 @@ namespace BloodMoon
                     delta.y = 0f;
                     float dSqr = delta.sqrMagnitude;
                     
-                    if (dSqr > 0.001f && dSqr < 1.44f) // 1.2 * 1.2
+                    // Increased separation radius from 1.2f to 3.0f for better spacing
+                    const float separationRadius = 3.0f;
+                    const float separationRadiusSqr = separationRadius * separationRadius;
+                    
+                    if (dSqr > 0.001f && dSqr < separationRadiusSqr)
                     {
                         float d = Mathf.Sqrt(dSqr);
-                        _sepBgResult += delta.normalized * (1.2f - d);
+                        // Simplified separation force calculation
+                        float force = (separationRadius - d) / separationRadius;
+                        force = Mathf.Clamp01(force);
+                        
+                        Vector3 separationForce = delta.normalized * force;
+                        _sepBgResult += separationForce;
                     }
                 }
-                _sepBgResult *= 0.6f;
-                _sepCooldown = 0.15f; // Update slightly more often since it's cheap now
+                
+                // Simplified Native Enemy Avoidance
+                // Only check nearby enemies using physics overlap instead of FindObjectsOfType
+                Collider[] nearbyEnemies = Physics.OverlapSphere(selfPos, 4.0f, -1); // Use all layers and filter manually
+                foreach (var collider in nearbyEnemies)
+                {
+                    var character = collider.GetComponent<CharacterMainControl>();
+                    if (character == null || character == _c) continue;
+                    
+                    // Check if this is a native enemy (not BloodMoon AI)
+                    bool isBloodMoonAI = character.GetComponent<BloodMoonAIController>() != null;
+                    if (isBloodMoonAI) continue;
+                    
+                    // Check if this character is hostile
+                    bool isHostile = character.Team != _c.Team;
+                    if (!isHostile) continue;
+                    
+                    Vector3 enemyPos = character.transform.position;
+                    Vector3 delta = selfPos - enemyPos;
+                    delta.y = 0f;
+                    float dSqr = delta.sqrMagnitude;
+                    
+                    const float enemyAvoidanceRadiusSqr = 16.0f; // 4.0f squared
+                    
+                    if (dSqr > 0.001f && dSqr < enemyAvoidanceRadiusSqr)
+                    {
+                        float d = Mathf.Sqrt(dSqr);
+                        // Simplified avoidance force
+                        float force = Mathf.Clamp01((4.0f - d) / 4.0f) * 1.5f;
+                        
+                        Vector3 avoidanceForce = delta.normalized * force;
+                        _sepBgResult += avoidanceForce;
+                    }
+                }
+                
+                // Simplified Wall Avoidance (only check front and sides)
+                Vector3 wallAvoidance = Vector3.zero;
+                int wallCheckCount = 3; // Reduced from 5 to 3
+                for (int i = 0; i < wallCheckCount; i++)
+                {
+                    float angle = (i - 1) * 45f; // -45, 0, 45 degrees
+                    Vector3 checkDir = Quaternion.AngleAxis(angle, Vector3.up) * _c.transform.forward;
+                    
+                    float checkDistance = 2.0f;
+                    RaycastHit hit;
+                    if (Physics.Raycast(
+                        _c.transform.position + Vector3.up * 1.0f,
+                        checkDir,
+                        out hit,
+                        checkDistance,
+                        GameplayDataSettings.Layers.wallLayerMask | GameplayDataSettings.Layers.halfObsticleLayer))
+                    {
+                        float force = Mathf.Lerp(0f, 1f, (checkDistance - hit.distance) / checkDistance);
+                        wallAvoidance += checkDir.normalized * force;
+                    }
+                }
+                
+                _sepBgResult += wallAvoidance;
+                
+                // Limit maximum separation force to prevent erratic behavior
+                float maxSeparationForce = 0.8f;
+                if (_sepBgResult.magnitude > maxSeparationForce)
+                {
+                    _sepBgResult = _sepBgResult.normalized * maxSeparationForce;
+                }
+                
+                // Simplified separation weight calculation
+                float separationWeight = 0.7f; // Fixed weight for better performance
+                _sepBgResult *= separationWeight;
+                
+                _sepCooldown = 0.2f; // Increased cooldown for better performance
             }
-            return (desired + _sepBgResult).normalized;
+            
+            // Combine separation force with desired movement
+            Vector3 finalMove = desired + _sepBgResult;
+            
+            // Simplified direction blending
+            if (desired.magnitude > 0.1f)
+            {
+                float dot = Vector3.Dot(desired.normalized, finalMove.normalized);
+                if (dot < 0.2f) // If directions are too different
+                {
+                    // Simple blend back towards original direction
+                    finalMove = Vector3.Lerp(finalMove, desired, 0.6f);
+                }
+            }
+            
+            return finalMove.normalized;
         }
         
         private void OnDestroy()

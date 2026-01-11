@@ -14,6 +14,11 @@ namespace BloodMoon
         public AIDataStore? Store;
         public CharacterMainControl? Target;
         
+        // Target Persistence
+        private float _targetSwitchCooldown;
+        private const float MIN_TARGET_SWITCH_TIME = 3.0f; // Minimum time to stick to a target
+        private float _timeWithCurrentTarget;
+        
         // Sensory Data
         public float DistToTarget;
         public Vector3 DirToTarget;
@@ -42,35 +47,69 @@ namespace BloodMoon
 
         private static void CacheAllCharacters()
         {
-            if (Time.time - _lastCacheTime < 1.0f) return;
+            if (Time.time - _lastCacheTime < 2.0f) return; // Increased from 1.0f to 2.0f
             _lastCacheTime = Time.time;
             
+            // Optimized: Only get characters in active scenes
             _cachedCharacters.Clear();
-            _cachedCharacters.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
+            var allCharacters = UnityEngine.Object.FindObjectsOfType<CharacterMainControl>();
+            
+            // Filter out characters in inactive scenes or not in raid map
+            foreach (var c in allCharacters)
+            {
+                if (c != null && c.gameObject.activeInHierarchy)
+                {
+                    _cachedCharacters.Add(c);
+                }
+            }
         }
 
         public void UpdateSensors()
         {
             if (Character == null) return;
 
+            // Update target persistence timers
+            if (_targetSwitchCooldown > 0f)
+            {
+                _targetSwitchCooldown -= Time.deltaTime;
+            }
+
+            if (Target != null)
+            {
+                _timeWithCurrentTarget += Time.deltaTime;
+            }
+            else
+            {
+                _timeWithCurrentTarget = 0f;
+            }
+
             // 1. Update Global Cache periodically (Shared by all AI)
-            CacheAllCharacters();
+            // Only update cache if we don't have a valid target
+            // This reduces expensive operations when AI already has a target
+            if (Target == null || Time.time - LastSeenTime > 5f)
+            {
+                CacheAllCharacters();
+            }
 
             // 2. Select Best Target
-            CharacterMainControl? bestTarget = CharacterMainControl.Main;
-            float bestDistSq = float.MaxValue;
+            CharacterMainControl? bestTarget = null;
+            float bestScore = -99999f;
             Vector3 myPos = Character.transform.position;
-
-            if (bestTarget != null)
-            {
-                bestDistSq = (bestTarget.transform.position - myPos).sqrMagnitude;
-            }
+            CharacterMainControl? currentTarget = Target;
 
             // Scan for other hostile targets
             if (_cachedCharacters != null)
             {
                 var myTeam = Character.Team;
                 int count = _cachedCharacters.Count;
+                
+                // Ensure Player is considered (sometimes might be missed if cache is stale or filter issues)
+                if (CharacterMainControl.Main != null && !_cachedCharacters.Contains(CharacterMainControl.Main))
+                {
+                    _cachedCharacters.Add(CharacterMainControl.Main);
+                    count++;
+                }
+
                 for(int i=0; i<count; i++)
                 {
                     var c = _cachedCharacters[i];
@@ -78,18 +117,80 @@ namespace BloodMoon
                     if (c.Health.CurrentHealth <= 0) continue;
                     
                     // Hostility Logic: Attack different teams
-                    // Assuming Teams.Neutral is handled elsewhere or doesn't exist.
-                    // Specifically targeting Native Enemies (usually Team 2) and Player (Team 1)
                     if (c.Team != myTeam) 
                     {
-                        float d2 = (c.transform.position - myPos).sqrMagnitude;
-                        if (d2 < bestDistSq)
+                        // Additional check: Ensure target is not a BloodMoon AI (same mod)
+                        // This prevents friendly fire between our mod's enemies
+                        bool isBloodMoonAI = c.GetComponent<BloodMoonAIController>() != null;
+                        if (isBloodMoonAI) continue;
+                        
+                        float dist = Vector3.Distance(c.transform.position, myPos);
+                        float score = 1000f - dist; // Base Score: Closer is better
+
+                        // --- Priority Rules ---
+                        
+                        // 1. Player Priority (Huge Bonus)
+                        // If player is alive, we almost ALWAYS want to target them unless they are very far away
+                        if (c == CharacterMainControl.Main)
                         {
-                            bestDistSq = d2;
+                            score += 500f; // Equivalent to being 500m closer
+                        }
+
+                        // 2. Target Stickiness (Enhanced Hysteresis)
+                        // Prevent rapid switching between targets of similar value
+                        if (c == currentTarget)
+                        {
+                            // Base stickiness bonus
+                            float stickinessBonus = 25f; // Increased from 15f
+                            
+                            // Additional bonus based on time spent with target
+                            stickinessBonus += Mathf.Min(30f, _timeWithCurrentTarget * 2f); // Up to 30f bonus for 15s with target
+                            
+                            score += stickinessBonus;
+                        }
+                        // Penalty for switching targets too soon
+                        else if (currentTarget != null && _targetSwitchCooldown > 0f)
+                        {
+                            // Reduce score by a significant amount if we're still in cooldown
+                            score -= 100f;
+                        }
+                        
+                        // 3. Distance Cap for "Ignoring" Player
+                        // If player is extremely far (>150m) and there is a native enemy right here (<10m), 
+                        // the native enemy might score higher:
+                        // Player Score: 1000 - 150 + 500 = 1350
+                        // Native Score: 1000 - 10 = 990
+                        // Result: Still Player. 
+                        // Let's adjust. If we really want to kill native enemies when player is absent or super far, 
+                        // the player bonus handles most cases.
+                        // But if player is present, we WANT to ignore native enemies mostly.
+                        
+                        if (score > bestScore)
+                        {
+                            bestScore = score;
                             bestTarget = c;
                         }
                     }
                 }
+            }
+
+            // Fallback: If no target found, but player is alive, target player
+            if (bestTarget == null && CharacterMainControl.Main != null && CharacterMainControl.Main.Health.CurrentHealth > 0)
+            {
+                 // Only if player is not ally
+                 if (CharacterMainControl.Main.Team != Character.Team)
+                    bestTarget = CharacterMainControl.Main;
+            }
+
+            // Check if target is changing
+            if (bestTarget != currentTarget)
+            {
+                // Set cooldown only if we're switching from a valid target
+                if (currentTarget != null)
+                {
+                    _targetSwitchCooldown = MIN_TARGET_SWITCH_TIME;
+                }
+                _timeWithCurrentTarget = 0f;
             }
 
             Target = bestTarget;
@@ -146,10 +247,45 @@ namespace BloodMoon
         protected float _score;
         protected float _cooldown;
         
+        // Behavior persistence
+        protected float _timeInAction;
+        protected float _minActionDuration;
+        protected float _maxActionDuration;
+        protected bool _shouldExit;
+        
         public abstract float Evaluate(AIContext ctx);
         public abstract void Execute(AIContext ctx);
-        public virtual void OnEnter(AIContext ctx) { }
-        public virtual void OnExit(AIContext ctx) { }
+        public virtual void OnEnter(AIContext ctx) 
+        { 
+            _timeInAction = 0f;
+            _shouldExit = false;
+            // Set default min/max durations based on action type
+            _minActionDuration = 1.0f;
+            _maxActionDuration = 10.0f;
+        }
+        public virtual void OnExit(AIContext ctx) 
+        { 
+            _timeInAction = 0f;
+            _shouldExit = false;
+        }
+        
+        // Update action time and check if we should continue
+        public void UpdateActionTime(float dt)
+        {
+            _timeInAction += dt;
+        }
+        
+        // Check if action can be interrupted
+        public bool CanBeInterrupted()
+        {
+            return _timeInAction > _minActionDuration;
+        }
+        
+        // Check if action should automatically exit
+        public bool ShouldExit()
+        {
+            return _shouldExit || _timeInAction > _maxActionDuration;
+        }
         
         public bool IsCoolingDown() 
         { 
@@ -199,8 +335,16 @@ namespace BloodMoon
         {
             if (ctx.Character == null || ctx.Controller == null) return 0f;
             
-            // If already committed to healing, keep going unless critical
-            if (ctx.Controller.IsHealing) return 0.98f;
+            // If already committed to healing, but being attacked, lower priority
+            if (ctx.Controller.IsHealing)
+            {
+                // If being attacked (high pressure or low health), allow interruption
+                if (ctx.Pressure > 3.0f || ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth < 0.3f)
+                {
+                    return 0.5f; // Lower priority to allow attack actions
+                }
+                return 0.8f; // Lowered from 0.98f to allow interruption
+            }
 
             // Optimization: Early exit if no meds
             if (!ctx.Controller.HasHealingItem()) return 0f;
@@ -217,10 +361,11 @@ namespace BloodMoon
             // 2. Safety Bonus: If hidden, take opportunity to heal
             if (!ctx.HasLoS) urgency += 0.2f;
             
-            // 3. Pressure Penalty: Reduced penalty to encourage healing even in combat
+            // 3. Pressure Penalty: Increased penalty when being attacked
             // Bosses are less affected by pressure
-            float pressurePenalty = ctx.Controller.IsBoss ? 0.0f : 0.1f;
-            if (ctx.Pressure > 2.0f) urgency -= pressurePenalty;
+            float pressurePenalty = ctx.Controller.IsBoss ? 0.1f : 0.3f;
+            if (ctx.Pressure > 1.0f) urgency -= pressurePenalty;
+            if (ctx.Pressure > 3.0f) urgency -= pressurePenalty * 2f; // Double penalty when under heavy fire
             
             // 4. Personality Variation (Randomness)
             // Use ID to create a fixed random offset for this agent
@@ -455,19 +600,39 @@ namespace BloodMoon
 
             if (ctx.HasLoS && ctx.DistToTarget < engageDist)
             {
-                // Base score
-                float score = 0.5f;
-                // Bonus if we are safe (low pressure)
-                if (ctx.Pressure < 1.0f) score += 0.2f;
-                // Bonus if target is close
-                if (ctx.DistToTarget < 15f) score += 0.1f;
+                // Smooth engagement score based on distance
+                float distFactor = Mathf.Clamp01((engageDist - ctx.DistToTarget) / engageDist);
                 
-                // Bosses are more aggressive
+                // Base score with smooth distance-based weighting
+                float score = 0.3f + (distFactor * 0.4f); // Range: 0.3 to 0.7
+                
+                // Bonus if we are safe (low pressure) - smooth transition
+                float pressureFactor = Mathf.Clamp01((3.0f - ctx.Pressure) / 3.0f);
+                score += pressureFactor * 0.2f;
+                
+                // Bonus if target is close - smooth transition
+                float closeRangeBonus = Mathf.Clamp01((15f - ctx.DistToTarget) / 15f);
+                score += closeRangeBonus * 0.1f;
+                
+                // Bosses are more aggressive - consistent bonus
                 if (ctx.Controller != null && ctx.Controller.IsBoss) score += 0.15f;
                 
-                // Penalty if low health (prioritize healing/cover)
+                // Health Logic Update:
                 float hp = ctx.Character != null ? ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth : 1f;
-                if (hp < 0.4f) score -= 0.3f;
+                
+                // If critical health AND enemy is close -> Desperate Fight (Cornered Beast)
+                if (hp < 0.3f && ctx.DistToTarget < 10f)
+                {
+                    // Smooth desperate fight bonus based on health and distance
+                    float desperateFactor = Mathf.Clamp01((0.3f - hp) / 0.3f) * Mathf.Clamp01((10f - ctx.DistToTarget) / 10f);
+                    score += desperateFactor * 0.4f; // Fight for your life!
+                }
+                // Only penalize engagement if we are hurt but have distance (so we might retreat/heal)
+                else if (hp < 0.4f && ctx.DistToTarget > 15f) 
+                {
+                    float retreatFactor = Mathf.Clamp01((0.4f - hp) / 0.4f) * Mathf.Clamp01((ctx.DistToTarget - 15f) / 15f);
+                    score -= retreatFactor * 0.15f;
+                }
 
                 return Mathf.Clamp01(score);
             }

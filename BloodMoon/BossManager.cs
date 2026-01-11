@@ -218,22 +218,18 @@ namespace BloodMoon
             count = Mathf.Clamp(count, 3, 10); 
 
             for (int i = 0; i < count; i++)
-            {
+            { 
                  var preset = minionPresets[UnityEngine.Random.Range(0, minionPresets.Count)];
                  
-                // Random Spawn Point Logic (Using Cache directly without custom filters)
-                 Vector3 spawnPos = anchor; 
-                 if (_pointsCache.Count > 0)
-                 {
-                     var pt = _pointsCache[UnityEngine.Random.Range(0, _pointsCache.Count)];
-                     if (pt != null) spawnPos = pt.GetRandomPoint();
-                 }
-                 else
-                 {
-                     // Fallback to simple offset if no points
-                     var offset = UnityEngine.Random.insideUnitCircle * UnityEngine.Random.Range(3f, 8f);
-                     spawnPos = anchor + new Vector3(offset.x, 0, offset.y);
-                 }
+                // Always spawn minions near the boss to ensure they stay together
+                 Vector3 spawnPos = anchor;
+                 
+                // Use boss's current position as the anchor, not the initial spawn point
+                 Vector3 bossPos = boss.transform.position;
+                 
+                // Generate random offset near the boss (3-8 meters)
+                 var offset = UnityEngine.Random.insideUnitCircle * UnityEngine.Random.Range(3f, 8f);
+                 spawnPos = bossPos + new Vector3(offset.x, 0, offset.y);
                  
                  // Basic ground check for safety
                  if (UnityEngine.AI.NavMesh.SamplePosition(spawnPos, out var hit, 10f, UnityEngine.AI.NavMesh.AllAreas))
@@ -272,17 +268,20 @@ namespace BloodMoon
                          clone.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
 
                          clone.SetTeam(Teams.wolf);
-                         
-                         var custom = clone.gameObject.AddComponent<BloodMoonAIController>();
-                         custom.Init(clone, _store);
-                         custom.SetChaseDelay(0f);
-                         custom.SetWingAssignment(boss, i);
-                         
-                         var ai = clone.GetComponent<AICharacterController>();
-                         if (ai != null) ai.leader = boss;
+                        
+                        // Ensure minion has weapons
+                        EnsureMinionHasWeapons(clone);
+                        
+                        var custom = clone.gameObject.AddComponent<BloodMoonAIController>();
+                        custom.Init(clone, _store);
+                        custom.SetChaseDelay(0f);
+                        custom.SetWingAssignment(boss, i);
+                        
+                        var ai = clone.GetComponent<AICharacterController>();
+                        if (ai != null) ai.leader = boss;
 
-                         _processed.Add(clone);
-                         _charactersCache.Add(clone);
+                        _processed.Add(clone);
+                        _charactersCache.Add(clone);
                      }
                  }
                  catch (System.Exception ex)
@@ -377,10 +376,53 @@ namespace BloodMoon
                 }
                 if (c.Team != Teams.wolf) c.SetTeam(Teams.wolf);
                 if (ModConfig.Instance.EnableBossGlow) AddBossGlow(c);
+
+                AddRandomLoot(c).Forget();
             }
             catch (System.Exception e)
             {
                 Debug.LogError($"[BloodMoon] EnhanceBoss Error: {e}");
+            }
+        }
+
+        private async UniTaskVoid AddRandomLoot(CharacterMainControl c)
+        {
+            if (c == null || c.CharacterItem == null || c.CharacterItem.Inventory == null) return;
+
+            try
+            {
+                // Search for high quality items (Quality 4+)
+                // Search() automatically downgrades quality if no items are found at the requested level.
+                var filter = new ItemFilter
+                {
+                    minQuality = 4,
+                    maxQuality = 10
+                };
+
+                int[] ids = ItemAssetsCollection.Search(filter);
+                
+                if (ids != null && ids.Length > 0)
+                {
+                    // Add 1-3 random high-quality items
+                    int count = UnityEngine.Random.Range(1, 4);
+                    for (int i = 0; i < count; i++)
+                    {
+                        int id = ids[UnityEngine.Random.Range(0, ids.Length)];
+                        var item = await ItemAssetsCollection.InstantiateAsync(id);
+                        if (item != null)
+                        {
+                            if (!c.CharacterItem.Inventory.AddAndMerge(item))
+                            {
+                                // If inventory is full, just drop it at the boss's feet
+                                item.Drop(c.transform.position, true, Vector3.up, 360f);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BloodMoon] Add Loot Error: {e}");
             }
         }
 
@@ -428,6 +470,24 @@ namespace BloodMoon
             if (s != null) s.BaseValue *= m;
         }
 
+        private void IncreaseInventoryCapacity(Item item, int amount)
+        {
+            if (item == null) return;
+            var stat = item.GetStat("InventoryCapacity".GetHashCode());
+            if (stat != null)
+            {
+                stat.BaseValue += amount;
+                if (item.Inventory != null)
+                {
+                    item.Inventory.SetCapacity(Mathf.RoundToInt(stat.BaseValue));
+                }
+            }
+            else if (item.Inventory != null)
+            {
+                 item.Inventory.SetCapacity(item.Inventory.Capacity + amount);
+            }
+        }
+
 
 
 
@@ -449,7 +509,11 @@ namespace BloodMoon
             {
                 custom.SetChaseDelay(0f);
             }
-            c.PopText(Localization.Get("Boss_Revenge"));
+            
+            // Random Taunt
+            string[] taunts = { "Boss_Revenge", "Boss_Taunt_1", "Boss_Taunt_2", "Boss_Taunt_3" };
+            string key = taunts[UnityEngine.Random.Range(0, taunts.Length)];
+            c.PopText(Localization.Get(key));
         }
 
 
@@ -462,10 +526,74 @@ namespace BloodMoon
         {
             var body = item.GetStat("BodyArmor".GetHashCode());
             var head = item.GetStat("HeadArmor".GetHashCode());
-            float bodyTarget = isBoss ? ModConfig.Instance.BossDefense : ModConfig.Instance.MinionDefense;
-            float headTarget = isBoss ? ModConfig.Instance.BossDefense : ModConfig.Instance.MinionDefense;
+            float bodyTarget = isBoss ? ModConfig.Instance.BossBodyArmor : ModConfig.Instance.MinionBodyArmor;
+            float headTarget = isBoss ? ModConfig.Instance.BossHeadArmor : ModConfig.Instance.MinionHeadArmor;
             if (body != null) body.BaseValue = Mathf.Max(body.BaseValue, bodyTarget);
             if (head != null) head.BaseValue = Mathf.Max(head.BaseValue, headTarget);
+        }
+        
+        private void EnsureMinionHasWeapons(CharacterMainControl character)
+        {
+            if (character == null || character.CharacterItem == null) return;
+            
+            bool hasMelee = false;
+            bool hasGun = false;
+            
+            // Check if character already has weapons
+            if (character.MeleeWeaponSlot()?.Content != null) hasMelee = true;
+            if (character.PrimWeaponSlot()?.Content != null) hasGun = true;
+            if (character.SecWeaponSlot()?.Content != null) hasGun = true;
+            
+            // If character has both melee and gun, we're good
+            if (hasMelee && hasGun) return;
+            
+            // Try to add melee weapon if missing
+            if (!hasMelee)
+            {
+                TryAddMeleeWeapon(character);
+            }
+            
+            // Try to add gun if missing
+            if (!hasGun)
+            {
+                TryAddGun(character);
+            }
+        }
+        
+        private void TryAddMeleeWeapon(CharacterMainControl character)
+        {
+            if (character == null || character.CharacterItem == null) return;
+            
+            try
+            {
+                // Basic melee weapon assignment
+                if (character.MeleeWeaponSlot()?.Content == null)
+                {
+                    Debug.LogWarning($"[BloodMoon] Minion missing melee weapon: {character.name}");
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[BloodMoon] Failed to add melee weapon: {ex}");
+            }
+        }
+        
+        private void TryAddGun(CharacterMainControl character)
+        {
+            if (character == null || character.CharacterItem == null) return;
+            
+            try
+            {
+                // Basic gun assignment
+                if (character.PrimWeaponSlot()?.Content == null && character.SecWeaponSlot()?.Content == null)
+                {
+                    Debug.LogWarning($"[BloodMoon] Minion missing guns: {character.name}");
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[BloodMoon] Failed to add gun: {ex}");
+            }
         }
 
 
@@ -648,7 +776,9 @@ namespace BloodMoon
                     await Task.Run(() =>
                     {
                         var rnd = new System.Random();
-                        selected = allBossPresets.OrderBy(_ => rnd.Next()).Take(3).ToArray();
+                        int bossCount = ModConfig.Instance.BossCount;
+                        bossCount = Mathf.Clamp(bossCount, 1, 5); // Limit between 1 and 5 bosses
+                        selected = allBossPresets.OrderBy(_ => rnd.Next()).Take(bossCount).ToArray();
                     });
 
                     // Force return to Main Thread to ensure Unity API safety
