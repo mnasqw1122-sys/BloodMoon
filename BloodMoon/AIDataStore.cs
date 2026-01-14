@@ -625,5 +625,89 @@ namespace BloodMoon
             }
             return list.Count;
         }
+
+        // --- Global Character Cache & Spatial Grid ---
+        
+        private List<CharacterMainControl> _globalCharacterCache = new List<CharacterMainControl>();
+        private float _lastCacheUpdateTime;
+        private SpatialGrid _spatialGrid = new SpatialGrid();
+        
+        public List<CharacterMainControl> AllCharacters => _globalCharacterCache;
+        public SpatialGrid Grid => _spatialGrid;
+        
+        public void UpdateCache()
+        {
+            if (Time.time - _lastCacheUpdateTime < 0.5f) return; // Update 2Hz
+            _lastCacheUpdateTime = Time.time;
+            
+            _globalCharacterCache.Clear();
+            var all = UnityEngine.Object.FindObjectsOfType<CharacterMainControl>();
+            for(int i=0; i<all.Length; i++)
+            {
+                if(all[i] != null && all[i].gameObject.activeInHierarchy && all[i].Health.CurrentHealth > 0)
+                {
+                    _globalCharacterCache.Add(all[i]);
+                }
+            }
+            
+            // Rebuild Spatial Grid
+            _spatialGrid.Clear();
+            foreach(var c in _globalCharacterCache)
+            {
+                _spatialGrid.Add(c);
+            }
+        }
+    }
+
+    public class SpatialGrid
+    {
+        private Dictionary<Vector2Int, List<CharacterMainControl>> _grid = new Dictionary<Vector2Int, List<CharacterMainControl>>();
+        private float _cellSize = 15f; // Cell size
+        
+        public void Clear() => _grid.Clear();
+        
+        public void Add(CharacterMainControl c)
+        {
+            Vector2Int cell = GetCell(c.transform.position);
+            if (!_grid.TryGetValue(cell, out var list))
+            {
+                list = new List<CharacterMainControl>();
+                _grid[cell] = list;
+            }
+            list.Add(c);
+        }
+        
+        public void Query(Vector3 pos, float radius, List<CharacterMainControl> result)
+        {
+            result.Clear();
+            int cellRange = Mathf.CeilToInt(radius / _cellSize);
+            Vector2Int center = GetCell(pos);
+            float sqrRadius = radius * radius;
+            
+            for (int x = -cellRange; x <= cellRange; x++)
+            {
+                for (int y = -cellRange; y <= cellRange; y++)
+                {
+                    Vector2Int key = center + new Vector2Int(x, y);
+                    if (_grid.TryGetValue(key, out var list))
+                    {
+                        for(int i=0; i<list.Count; i++)
+                        {
+                            var c = list[i];
+                            if (c == null) continue;
+                            if (Vector3.SqrMagnitude(c.transform.position - pos) <= sqrRadius)
+                            {
+                                result.Add(c);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        private Vector2Int GetCell(Vector3 pos)
+        {
+            return new Vector2Int(Mathf.FloorToInt(pos.x / _cellSize), Mathf.FloorToInt(pos.z / _cellSize));
+        }
     }
 }

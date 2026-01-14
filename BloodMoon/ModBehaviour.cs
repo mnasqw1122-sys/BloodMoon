@@ -135,6 +135,7 @@ namespace BloodMoon
             {
                 _uiRefreshTimer = 0f;
                 _ui.Refresh(now);
+                _dataStore.UpdateCache(); // Update global AI cache
             }
             
             // Logic Safety: Check if LevelManager is valid first

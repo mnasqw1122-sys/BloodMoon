@@ -36,7 +36,6 @@ namespace BloodMoon
         private bool _bloodMoonActive;
         private float _strategyDecayTimer;
         private readonly List<CharacterMainControl> _charactersCache = new List<CharacterMainControl>();
-        private float _charactersRescanCooldown;
         private List<MonoBehaviour> _disabledSpawners = new List<MonoBehaviour>();
 
 
@@ -117,6 +116,8 @@ namespace BloodMoon
             _disabledSpawners.Clear();
         }
 
+        private float _weightCheckTimer;
+
         public void Tick()
         {
             try 
@@ -126,6 +127,20 @@ namespace BloodMoon
                 if (!LevelManager.Instance || !LevelManager.Instance.IsRaidMap || LevelManager.Instance.IsBaseLevel)
                 {
                     return;
+                }
+
+                // Periodic Weight Enforcement
+                _weightCheckTimer -= Time.deltaTime;
+                if (_weightCheckTimer <= 0f)
+                {
+                    _weightCheckTimer = 10.0f; // Force fix every 10 seconds to persist against system resets
+                    foreach(var c in _processed)
+                    {
+                        if (c != null && c.gameObject.activeInHierarchy && c.Health.CurrentHealth > 0)
+                        {
+                            FixWeight(c, c.CharacterItem);
+                        }
+                    }
                 }
 
                 // Initialize start time if active and not set, or reset if expired and new raid?
@@ -142,48 +157,46 @@ namespace BloodMoon
                     // Wait for setup to complete
                     return;
                 }
-                if (_charactersRescanCooldown <= 0f)
+                
+                // Centralized cleanup (every few seconds)
+                if (_scanCooldown > 0.9f) // Do this once per scan cycle
                 {
-                    // Simple optimization: only scan if we are not overloaded
-                    _charactersCache.Clear();
-                    _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
-                    
-                    // Refresh points cache if empty (backup safety)
-                    if (_pointsCache.Count == 0)
-                    {
+                     _store.DecayAndPrune(Time.time, 120f);
+                     
+                     // Backup: If cache empty, try to find points
+                     if (_pointsCache.Count == 0)
+                     {
                         var spawners = UnityEngine.Object.FindObjectsOfType<RandomCharacterSpawner>();
                         foreach (var s in spawners) { if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints); }
-                        var waveSpawners = UnityEngine.Object.FindObjectsOfType<WaveCharacterSpawner>();
-                        foreach (var s in waveSpawners) { if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints); }
-                    }
-                    
-                    // Scan more frequently to catch new spawns (waves)
-                    _charactersRescanCooldown = 2.0f;
-                    // DisableVanillaControllersCached();
-                    
-                    // Centralized cleanup
-                    _store.DecayAndPrune(Time.time, 120f);
+                     }
                 }
-                _charactersRescanCooldown -= Time.deltaTime;
-                var all = _charactersCache;
-                foreach (var c in all)
+
+                // Use Centralized Store Cache
+                var all = _store.AllCharacters;
+                int count = all.Count;
+                
+                for (int i = 0; i < count; i++)
                 {
+                    var c = all[i];
                     if (c == null || c.IsMainCharacter) continue;
+                    
+                    // Optimization: Check if already processed before doing heavy checks
+                    if (_processed.Contains(c)) continue;
+
                     var preset = c.characterPreset;
                     bool isBoss = preset != null && preset.GetCharacterIcon() == GameplayDataSettings.UIStyle.BossCharacterIcon;
                     if (!isBoss) continue;
+                    
                     if (_selectionInitialized && preset != null && !_selectedBossPresets.Contains(preset))
                     {
                         continue;
                     }
-                    if (!_processed.Contains(c))
-                    {
-                        EnhanceBoss(c);
-                        // SetupBossLocation(c); // Removed
-                        EnableRevenge(c, player);
-                        SpawnMinionsForBoss(c, c.transform.position, c.gameObject.scene.buildIndex).Forget();
-                        _processed.Add(c);
-                    }
+                    
+                    EnhanceBoss(c);
+                    // SetupBossLocation(c); // Removed
+                    EnableRevenge(c, player);
+                    SpawnMinionsForBoss(c, c.transform.position, c.gameObject.scene.buildIndex).Forget();
+                    _processed.Add(c);
                 }
                 
                 _scanCooldown = 1.0f;
@@ -262,15 +275,13 @@ namespace BloodMoon
                          if (mh != null) mh.BaseValue *= ModConfig.Instance.MinionHealthMultiplier;
                          clone.Health.SetHealth(clone.Health.MaxHealth);
                          
-                         var mw = charItem.GetStat("MaxWeight".GetHashCode());
-                         if (mw != null) mw.BaseValue = 1000f;
-                         clone.UpdateWeightState();
-                         clone.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
+                         // Fix Weight Issues for Minion
+                         FixWeight(clone, charItem);
 
                          clone.SetTeam(Teams.wolf);
                         
                         // Ensure minion has weapons
-                        EnsureMinionHasWeapons(clone);
+                        await EnsureMinionHasWeapons(clone);
                         
                         var custom = clone.gameObject.AddComponent<BloodMoonAIController>();
                         custom.Init(clone, _store);
@@ -344,6 +355,29 @@ namespace BloodMoon
             }
         }
 
+        private void FixWeight(CharacterMainControl c, Item item)
+        {
+            if (c == null || item == null) return;
+
+            // 1. Set massive MaxWeight
+            var mw = item.GetStat("MaxWeight".GetHashCode());
+            if (mw != null) mw.BaseValue = 10000f; // 10000kg
+
+            // 2. Set massive Inventory Capacity to prevent looting block
+            var cap = item.GetStat("InventoryCapacity".GetHashCode());
+            if (cap != null) cap.BaseValue = 200f; // 200 slots
+
+            // 3. Remove existing Overweight Buffs
+            c.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
+            
+            // 4. Force Update Weight State
+            c.UpdateWeightState();
+
+            // 5. Apply Walk/Run Speed Multipliers again just in case weight system overrides them
+            //    Usually weight reduces speed by percentage, so boosting base speed helps
+            //    But if MaxWeight is 10000, current weight should be 0% load, so no penalty.
+        }
+
         private void EnhanceBoss(CharacterMainControl c)
         {
             // IMMEDIATELY disable vanilla AI to prevent logic conflict during async setup
@@ -355,16 +389,16 @@ namespace BloodMoon
                 if (item == null) return;
                 var maxHealth = item.GetStat("MaxHealth".GetHashCode());
                 if (maxHealth != null) maxHealth.BaseValue *= ModConfig.Instance.BossHealthMultiplier;
+                
                 Multiply(item, "WalkSpeed", 1.35f);
                 Multiply(item, "RunSpeed", 1.35f);
                 Multiply(item, "TurnSpeed", 1.35f);
                 BoostDefense(item, true);
-                var mw = item.GetStat("MaxWeight".GetHashCode());
-                if (mw != null) mw.BaseValue = 1000f;
+                
+                // Fix Weight Issues
+                FixWeight(c, item);
                 
                 c.Health.SetHealth(c.Health.MaxHealth);
-                c.UpdateWeightState();
-                c.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
                 
                 // Ensure AI is attached to the boss if not present
                 var custom = c.GetComponent<BloodMoonAIController>();
@@ -399,7 +433,12 @@ namespace BloodMoon
                     maxQuality = 10
                 };
 
-                int[] ids = ItemAssetsCollection.Search(filter);
+                int[]? ids = null;
+                try
+                {
+                    ids = ItemAssetsCollection.Search(filter);
+                }
+                catch {}
                 
                 if (ids != null && ids.Length > 0)
                 {
@@ -532,7 +571,7 @@ namespace BloodMoon
             if (head != null) head.BaseValue = Mathf.Max(head.BaseValue, headTarget);
         }
         
-        private void EnsureMinionHasWeapons(CharacterMainControl character)
+        private async UniTask EnsureMinionHasWeapons(CharacterMainControl character)
         {
             if (character == null || character.CharacterItem == null) return;
             
@@ -550,26 +589,102 @@ namespace BloodMoon
             // Try to add melee weapon if missing
             if (!hasMelee)
             {
-                TryAddMeleeWeapon(character);
+                await TryAddMeleeWeapon(character);
             }
             
             // Try to add gun if missing
             if (!hasGun)
             {
-                TryAddGun(character);
+                await TryAddGun(character);
             }
         }
         
-        private void TryAddMeleeWeapon(CharacterMainControl character)
+        private async UniTask TryAddMeleeWeapon(CharacterMainControl character)
         {
             if (character == null || character.CharacterItem == null) return;
             
             try
             {
-                // Basic melee weapon assignment
                 if (character.MeleeWeaponSlot()?.Content == null)
                 {
-                    Debug.LogWarning($"[BloodMoon] Minion missing melee weapon: {character.name}");
+                    // 1. Try Specific Tags First
+                    Tag meleeTag = GameplayDataSettings.Tags.AllTags.FirstOrDefault(t => t.name == "Melee");
+                    if (meleeTag == null) meleeTag = GameplayDataSettings.Tags.AllTags.FirstOrDefault(t => t.name == "Weapon");
+
+                    var filter = new ItemFilter
+                    {
+                        minQuality = 1,
+                        maxQuality = 5,
+                        requireTags = meleeTag != null ? new Tag[] { meleeTag } : null
+                    };
+                    
+                    int[]? ids = null;
+                    try 
+                    {
+                        ids = ItemAssetsCollection.Search(filter);
+                    }
+                    catch (System.Exception) 
+                    { 
+                        // Swallow search errors (like IndexOutOfRange from StringBuilder race conditions)
+                    }
+                    
+                    // 2. Fallback: Search Broadly if specific search failed
+                    if (ids == null || ids.Length == 0)
+                    {
+                        // Try searching for "Weapon" if we tried "Melee" before
+                        if (meleeTag != null && meleeTag.name == "Melee")
+                        {
+                            var weaponTag = GameplayDataSettings.Tags.AllTags.FirstOrDefault(t => t.name == "Weapon");
+                            if (weaponTag != null)
+                            {
+                                filter.requireTags = new Tag[] { weaponTag };
+                                try 
+                                {
+                                    ids = ItemAssetsCollection.Search(filter);
+                                }
+                                catch {}
+                            }
+                        }
+                    }
+                    
+                    // 3. Desperate Fallback: Search EVERYTHING (No tags)
+                    if (ids == null || ids.Length == 0)
+                    {
+                        filter.requireTags = null; // Clear tags
+                        try 
+                        {
+                            ids = ItemAssetsCollection.Search(filter);
+                        }
+                        catch {}
+                    }
+
+                    if (ids != null && ids.Length > 0)
+                    {
+                        // Try up to 15 times to find a valid weapon (increased from 3)
+                        // Since we might be searching broadly, we need more attempts to hit a valid weapon
+                        int attempts = filter.requireTags == null ? 15 : 5;
+                        
+                        for(int i=0; i<attempts; i++)
+                        {
+                            int id = ids[UnityEngine.Random.Range(0, ids.Length)];
+                            var item = await ItemAssetsCollection.InstantiateAsync(id);
+                            if (item != null)
+                            {
+                                var slot = character.MeleeWeaponSlot();
+                                if (slot != null && slot.CanPlug(item))
+                                {
+                                    if (character.CharacterItem.Inventory.AddAndMerge(item))
+                                    {
+                                        slot.Plug(item, out var _);
+                                        return; // Success
+                                    }
+                                }
+                                UnityEngine.Object.Destroy(item.gameObject);
+                            }
+                        }
+                    }
+
+                    Debug.LogWarning($"[BloodMoon] Minion missing melee weapon: {character.name} (All searches failed)");
                 }
             }
             catch (System.Exception ex)
@@ -578,22 +693,106 @@ namespace BloodMoon
             }
         }
         
-        private void TryAddGun(CharacterMainControl character)
+        private async UniTask TryAddGun(CharacterMainControl character)
         {
             if (character == null || character.CharacterItem == null) return;
             
             try
             {
-                // Basic gun assignment
                 if (character.PrimWeaponSlot()?.Content == null && character.SecWeaponSlot()?.Content == null)
                 {
-                    Debug.LogWarning($"[BloodMoon] Minion missing guns: {character.name}");
+                    // 1. Try Specific Tags
+                    var filter = new ItemFilter
+                    {
+                        minQuality = 1,
+                        maxQuality = 6,
+                        requireTags = new Tag[] { GameplayDataSettings.Tags.Gun }
+                    };
+                    
+                    int[]? ids = null;
+                    try
+                    {
+                        ids = ItemAssetsCollection.Search(filter);
+                    }
+                    catch {}
+                    
+                    // 2. Fallback: Broad Search if Gun tag fails (unlikely but safe)
+                    if (ids == null || ids.Length == 0)
+                    {
+                         filter.requireTags = null;
+                         try 
+                         {
+                             ids = ItemAssetsCollection.Search(filter);
+                         }
+                         catch {}
+                    }
+
+                    if (ids != null && ids.Length > 0)
+                    {
+                        int attempts = filter.requireTags == null ? 15 : 5;
+                        
+                        for(int i=0; i<attempts; i++)
+                        {
+                            int id = ids[UnityEngine.Random.Range(0, ids.Length)];
+                            var item = await ItemAssetsCollection.InstantiateAsync(id);
+                            if (item != null)
+                            {
+                                var pSlot = character.PrimWeaponSlot();
+                                var sSlot = character.SecWeaponSlot();
+                                
+                                bool added = character.CharacterItem.Inventory.AddAndMerge(item);
+                                if (added)
+                                {
+                                    if (pSlot != null && pSlot.CanPlug(item))
+                                    {
+                                        pSlot.Plug(item, out var _);
+                                        await AddAmmoForGun(character, item);
+                                        return;
+                                    }
+                                    else if (sSlot != null && sSlot.CanPlug(item))
+                                    {
+                                        sSlot.Plug(item, out var _);
+                                        await AddAmmoForGun(character, item);
+                                        return;
+                                    }
+                                }
+                                if (!added) UnityEngine.Object.Destroy(item.gameObject);
+                            }
+                        }
+                    }
+
+                    Debug.LogWarning($"[BloodMoon] Minion missing guns: {character.name} (All searches failed)");
                 }
             }
             catch (System.Exception ex)
             {
                 Debug.LogError($"[BloodMoon] Failed to add gun: {ex}");
             }
+        }
+
+        private async UniTask AddAmmoForGun(CharacterMainControl c, Item gun)
+        {
+            try
+            {
+                var bullet = await ItemUtilities.GenerateBullet(gun);
+                if (bullet != null)
+                {
+                    bullet.StackCount = bullet.MaxStackCount; // Full stack
+                    c.CharacterItem.Inventory.AddAndMerge(bullet);
+                    
+                    // Add a few more stacks
+                    for(int i=0; i<2; i++)
+                    {
+                        var extra = await ItemUtilities.GenerateBullet(gun);
+                        if (extra != null)
+                        {
+                             extra.StackCount = extra.MaxStackCount;
+                             c.CharacterItem.Inventory.AddAndMerge(extra);
+                        }
+                    }
+                }
+            }
+            catch {}
         }
 
 
@@ -608,9 +807,12 @@ namespace BloodMoon
 
         private void AssignWingIndicesForLeader(CharacterMainControl boss)
         {
-            // Optimization: Use cached characters
+            // Optimization: Use cached characters from Store
             var controllers = new List<AICharacterController>();
-            foreach(var c in _charactersCache) {
+            var all = _store.AllCharacters;
+            int count = all.Count;
+            for(int i=0; i<count; i++) {
+                var c = all[i];
                 if (c == null) continue;
                 var ai = c.GetComponent<AICharacterController>();
                 if (ai != null) controllers.Add(ai);
@@ -698,6 +900,9 @@ namespace BloodMoon
 
             UniTask.Void(async () =>
             {
+                // Wait for Level Initialization to settle (Avoid race conditions with Game's Spawners)
+                await UniTask.Delay(3000); 
+
                 await UniTask.Yield();
 
                 // --- Synchronous Initialization Phase ---

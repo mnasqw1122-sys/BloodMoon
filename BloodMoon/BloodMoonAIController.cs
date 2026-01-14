@@ -73,6 +73,7 @@ namespace BloodMoon
             _wingIndex = index;
         }
         private static readonly List<BloodMoonAIController> _all = new List<BloodMoonAIController>();
+        private static readonly List<CharacterMainControl> _nearbyCache = new List<CharacterMainControl>();
         private static readonly Collider[] _nonAllocColliders = new Collider[16];
         private float _sepCooldown;
         private UnityEngine.Vector3 _sepBgResult;
@@ -244,17 +245,21 @@ namespace BloodMoon
         {
             if (_bossCommandCooldown > 0f) return false;
             
-            // Buff nearby minions
+            // Buff nearby minions using Grid
             int count = 0;
-            foreach (var ally in _all)
+            if (_store != null && _store.Grid != null)
             {
-                if (ally == null || ally == this || ally.IsBoss) continue;
-                
-                float d = Vector3.Distance(_c.transform.position, ally.transform.position);
-                if (d < 25f)
+                _store.Grid.Query(_c.transform.position, 25f, _nearbyCache);
+                foreach (var ally in _nearbyCache)
                 {
-                    ally.ReceiveBuff();
-                    count++;
+                    if (ally == null || ally == _c) continue;
+                    
+                    var ai = ally.GetComponent<BloodMoonAIController>();
+                    if (ai != null && !ai.IsBoss && ally.Team == _c.Team)
+                    {
+                        ai.ReceiveBuff();
+                        count++;
+                    }
                 }
             }
             
@@ -1551,73 +1556,65 @@ namespace BloodMoon
             {
                 _sepBgResult = Vector3.zero;
                 Vector3 selfPos = _c.transform.position;
-                int count = _all.Count;
                 
-                // Skip separation logic if there are too many AI (performance optimization)
-                if (count > 20)
+                // Use Spatial Grid for neighbor lookup
+                if (_store != null && _store.Grid != null)
                 {
-                    _sepCooldown = 0.2f; // Increase cooldown for large groups
+                    _store.Grid.Query(selfPos, 5.0f, _nearbyCache);
+                }
+                else
+                {
+                    // Fallback should rarely happen
                     return desired;
                 }
                 
-                // AI-to-AI Separation (Most important part)
+                int count = _nearbyCache.Count;
+                
+                // Skip if too many neighbors (crowd optimization)
+                if (count > 30)
+                {
+                     _sepCooldown = 0.5f;
+                     return desired;
+                }
+
                 for (int i = 0; i < count; i++)
                 {
-                    var other = _all[i];
-                    if (other == null || other == this || other._c == null) continue;
+                    var other = _nearbyCache[i];
+                    if (other == null || other == _c) continue;
                     
-                    Vector3 otherPos = other._c.transform.position;
-                    Vector3 delta = selfPos - otherPos;
+                    Vector3 delta = selfPos - other.transform.position;
                     delta.y = 0f;
                     float dSqr = delta.sqrMagnitude;
                     
-                    // Increased separation radius from 1.2f to 3.0f for better spacing
-                    const float separationRadius = 3.0f;
-                    const float separationRadiusSqr = separationRadius * separationRadius;
+                    if (dSqr < 0.001f) continue;
+
+                    // Separation logic based on relationship
+                    bool isAlly = other.Team == _c.Team;
                     
-                    if (dSqr > 0.001f && dSqr < separationRadiusSqr)
+                    if (isAlly)
                     {
-                        float d = Mathf.Sqrt(dSqr);
-                        // Simplified separation force calculation
-                        float force = (separationRadius - d) / separationRadius;
-                        force = Mathf.Clamp01(force);
+                        const float separationRadius = 2.5f;
+                        const float separationRadiusSqr = separationRadius * separationRadius;
                         
-                        Vector3 separationForce = delta.normalized * force;
-                        _sepBgResult += separationForce;
+                        if (dSqr < separationRadiusSqr)
+                        {
+                            float d = Mathf.Sqrt(dSqr);
+                            float force = (separationRadius - d) / separationRadius;
+                            _sepBgResult += delta.normalized * force;
+                        }
                     }
-                }
-                
-                // Simplified Native Enemy Avoidance
-                // Only check nearby enemies using physics overlap instead of FindObjectsOfType
-                Collider[] nearbyEnemies = Physics.OverlapSphere(selfPos, 4.0f, -1); // Use all layers and filter manually
-                foreach (var collider in nearbyEnemies)
-                {
-                    var character = collider.GetComponent<CharacterMainControl>();
-                    if (character == null || character == _c) continue;
-                    
-                    // Check if this is a native enemy (not BloodMoon AI)
-                    bool isBloodMoonAI = character.GetComponent<BloodMoonAIController>() != null;
-                    if (isBloodMoonAI) continue;
-                    
-                    // Check if this character is hostile
-                    bool isHostile = character.Team != _c.Team;
-                    if (!isHostile) continue;
-                    
-                    Vector3 enemyPos = character.transform.position;
-                    Vector3 delta = selfPos - enemyPos;
-                    delta.y = 0f;
-                    float dSqr = delta.sqrMagnitude;
-                    
-                    const float enemyAvoidanceRadiusSqr = 16.0f; // 4.0f squared
-                    
-                    if (dSqr > 0.001f && dSqr < enemyAvoidanceRadiusSqr)
+                    else
                     {
-                        float d = Mathf.Sqrt(dSqr);
-                        // Simplified avoidance force
-                        float force = Mathf.Clamp01((4.0f - d) / 4.0f) * 1.5f;
+                        // Avoid enemies slightly
+                        const float avoidRadius = 4.0f;
+                        const float avoidRadiusSqr = avoidRadius * avoidRadius;
                         
-                        Vector3 avoidanceForce = delta.normalized * force;
-                        _sepBgResult += avoidanceForce;
+                        if (dSqr < avoidRadiusSqr)
+                        {
+                             float d = Mathf.Sqrt(dSqr);
+                             float force = ((avoidRadius - d) / avoidRadius) * 1.5f;
+                             _sepBgResult += delta.normalized * force;
+                        }
                     }
                 }
                 

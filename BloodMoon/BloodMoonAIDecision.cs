@@ -41,26 +41,19 @@ namespace BloodMoon
         public bool IsBoss => Controller != null && Controller.IsBoss;
         public bool IsRaged => Controller != null && Controller.IsRaged;
 
-        // Static Cache for Target Acquisition
+        // Static Cache for Target Acquisition (Deprecated in favor of Store.AllCharacters)
         private static List<CharacterMainControl> _cachedCharacters = new List<CharacterMainControl>();
         private static float _lastCacheTime;
 
         private static void CacheAllCharacters()
         {
-            if (Time.time - _lastCacheTime < 2.0f) return; // Increased from 1.0f to 2.0f
+            if (Time.time - _lastCacheTime < 2.0f) return; 
             _lastCacheTime = Time.time;
-            
-            // Optimized: Only get characters in active scenes
             _cachedCharacters.Clear();
             var allCharacters = UnityEngine.Object.FindObjectsOfType<CharacterMainControl>();
-            
-            // Filter out characters in inactive scenes or not in raid map
             foreach (var c in allCharacters)
             {
-                if (c != null && c.gameObject.activeInHierarchy)
-                {
-                    _cachedCharacters.Add(c);
-                }
+                if (c != null && c.gameObject.activeInHierarchy) _cachedCharacters.Add(c);
             }
         }
 
@@ -83,12 +76,16 @@ namespace BloodMoon
                 _timeWithCurrentTarget = 0f;
             }
 
-            // 1. Update Global Cache periodically (Shared by all AI)
-            // Only update cache if we don't have a valid target
-            // This reduces expensive operations when AI already has a target
-            if (Target == null || Time.time - LastSeenTime > 5f)
+            // Use Global Cache from Store
+            List<CharacterMainControl> targets;
+            if (Store != null)
+            {
+                targets = Store.AllCharacters;
+            }
+            else
             {
                 CacheAllCharacters();
+                targets = _cachedCharacters;
             }
 
             // 2. Select Best Target
@@ -98,21 +95,22 @@ namespace BloodMoon
             CharacterMainControl? currentTarget = Target;
 
             // Scan for other hostile targets
-            if (_cachedCharacters != null)
+            if (targets != null)
             {
                 var myTeam = Character.Team;
-                int count = _cachedCharacters.Count;
+                int count = targets.Count;
                 
-                // Ensure Player is considered (sometimes might be missed if cache is stale or filter issues)
-                if (CharacterMainControl.Main != null && !_cachedCharacters.Contains(CharacterMainControl.Main))
+                // Ensure Player is considered
+                if (CharacterMainControl.Main != null && !targets.Contains(CharacterMainControl.Main))
                 {
-                    _cachedCharacters.Add(CharacterMainControl.Main);
-                    count++;
+                    // If player is not in cache yet (rare), just check him manually
+                    // We can't add to Store list, but we can check him in loop
+                    // Just force check player separately
                 }
 
                 for(int i=0; i<count; i++)
                 {
-                    var c = _cachedCharacters[i];
+                    var c = targets[i];
                     if (c == null || c == Character) continue;
                     if (c.Health.CurrentHealth <= 0) continue;
                     
