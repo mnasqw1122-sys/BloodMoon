@@ -12,6 +12,9 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 
+using System.IO;
+using BloodMoon.Utils;
+
 namespace BloodMoon
 {
     public class ModBehaviour : Duckov.Modding.ModBehaviour
@@ -21,15 +24,44 @@ namespace BloodMoon
         private RedOverlay _overlay = null!;
         private BossManager _bossManager = null!;
         private AIDataStore _dataStore = null!;
+        private BloodMoon.AI.AdaptiveDifficulty _difficulty = null!;
+        private BloodMoon.AI.SquadManager _squadManager = null!;
 
         private void Awake()
         {
-            Debug.Log("BloodMoon Mod Loaded");
+            // Initialize Logger and Config
+            string modDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
+            BloodMoon.Utils.Logger.Initialize(modDir);
+            ModConfig.Initialize(modDir);
+
+            BloodMoon.Utils.Logger.Log("BloodMoon Mod Loaded");
+            
             _event = new BloodMoonEvent();
             _dataStore = new AIDataStore();
             _overlay = new RedOverlay();
             _bossManager = new BossManager(_dataStore);
             _ui = new BloodMoonUI(_event);
+            
+            _difficulty = new BloodMoon.AI.AdaptiveDifficulty();
+            _difficulty.Initialize();
+            
+            _squadManager = new BloodMoon.AI.SquadManager();
+            _squadManager.Initialize();
+            
+            // Initialize Weapon Manager Cache Early (async)
+            UniTask.Void(async () =>
+            {
+                try
+                {
+                    await BloodMoon.AI.EnhancedWeaponManager.Instance.EnsureInitialized();
+                    BloodMoon.Utils.Logger.Log("[ModBehaviour] Weapon Manager initialized successfully");
+                }
+                catch (System.Exception ex)
+                {
+                    BloodMoon.Utils.Logger.Error($"[ModBehaviour] Weapon Manager initialization failed: {ex}");
+                }
+            });
+
             SavesSystem.OnCollectSaveData += Save;
             
             Application.logMessageReceived += OnLogMessage;
@@ -38,22 +70,93 @@ namespace BloodMoon
 
         private void OnLogMessage(string condition, string stackTrace, LogType type)
         {
-            if (condition.StartsWith("[BloodMoon Debug]")) return;
+            if (condition.StartsWith("[BloodMoon]")) return; // Avoid infinite recursion if our logger uses Debug.Log
 
-            if (type == LogType.Exception || type == LogType.Error)
+            // Handle both Error/Exception types and Log messages that start with "Error: "
+            bool isError = type == LogType.Exception || type == LogType.Error;
+            bool isErrorLog = type == LogType.Log && condition.StartsWith("Error: ");
+            
+            if (isError || isErrorLog)
             {
-                // Catch all IndexOutOfRange exceptions to identify source
+                // Enhanced error categorization and logging
+                string errorCategory = "Unknown";
+                string detailedMessage = condition;
+                
+                // Categorize errors for better debugging
                 if (condition.Contains("Index was out of range") || condition.Contains("ArgumentOutOfRangeException"))
                 {
-                    Debug.LogError($"[BloodMoon Debug] Caught Index Error: {condition}\nStack: {stackTrace}");
+                    errorCategory = "IndexOutOfRange";
+                }
+                else if (condition.Contains("NullReferenceException") || condition.Contains("Object reference not set"))
+                {
+                    errorCategory = "NullReference";
+                }
+                else if (condition.Contains("MissingReferenceException") || condition.Contains("The object of type"))
+                {
+                    errorCategory = "MissingReference";
+                }
+                else if (condition.Contains("InvalidOperationException"))
+                {
+                    errorCategory = "InvalidOperation";
+                }
+                else if (condition.Contains("ArgumentException"))
+                {
+                    errorCategory = "Argument";
+                }
+                else if (condition.Contains("Timeout") || condition.Contains("timed out"))
+                {
+                    errorCategory = "Timeout";
+                }
+                else if (condition.Contains("OutOfMemory") || condition.Contains("Memory"))
+                {
+                    errorCategory = "Memory";
+                }
+                
+                // Log with category and stack trace
+                BloodMoon.Utils.Logger.Error($"[{errorCategory}] {detailedMessage}\nStack Trace:\n{stackTrace}");
+                
+                // Additional handling for critical errors
+                if (errorCategory == "IndexOutOfRange" || errorCategory == "NullReference")
+                {
+                    // These are critical errors that need immediate attention
+                    BloodMoon.Utils.Logger.Error($"CRITICAL: {errorCategory} error detected. This may cause game instability.");
+                    
+                    // Try to log additional context if available
+                    try
+                    {
+                        // Log current game state for debugging
+                        if (LevelManager.Instance != null)
+                        {
+                            // Note: LevelManager may not have CurrentLevelName property in this version
+                            // We'll use available properties
+                            BloodMoon.Utils.Logger.Error($"Game State: IsBaseLevel={LevelManager.Instance.IsBaseLevel}, IsRaidMap={LevelManager.Instance.IsRaidMap}");
+                        }
+                        
+                        // Log BloodMoon state
+                        if (_event != null)
+                        {
+                            // Note: BossManager may not have GetBossCount method in this version
+                            BloodMoon.Utils.Logger.Error($"BloodMoon State: Active={_event.IsActive(GameClock.Now)}");
+                        }
+                    }
+                    catch (System.Exception ex)
+                    {
+                        BloodMoon.Utils.Logger.Error($"Failed to log additional context: {ex.Message}");
+                    }
+                }
+            }
+            else if (type == LogType.Warning)
+            {
+                // Log warnings for monitoring
+                if (condition.Contains("BloodMoon") || condition.Contains("AI") || condition.Contains("Weapon"))
+                {
+                    BloodMoon.Utils.Logger.Warning($"Game Warning: {condition}");
                 }
             }
         }
 
         private void Start()
         {
-            // Force load config on main thread to avoid threading issues with Application.dataPath
-            var config = BloodMoon.Utils.ModConfig.Instance;
             Load();
             _bossManager.Initialize();
         }
@@ -154,6 +257,8 @@ namespace BloodMoon
             {
                 _overlay.Show();
                 _bossManager.Tick();
+                _squadManager.Update();
+                BloodMoon.AI.RuntimeMonitor.Instance.Update();
             }
             else
             {

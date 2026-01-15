@@ -259,8 +259,15 @@ namespace BloodMoon
                      var clone = await preset.CreateCharacterAsync(spawnPos, Vector3.forward, scene, null, false);
                      if (clone != null)
                      {
-                         await UniTask.Delay(100); 
+                         // Wait for initialization (Animator, MagicBlend, etc.)
+                         await UniTask.Yield(PlayerLoopTiming.Update);
+                         await UniTask.Delay(500); 
+                         
                          if (clone == null) continue;
+                         
+                         var anim = clone.GetComponent<Animator>();
+                         if (anim != null && !anim.isInitialized) await UniTask.Delay(200);
+
                          var charItem = clone.CharacterItem;
                          if (charItem == null) continue;
 
@@ -607,84 +614,24 @@ namespace BloodMoon
             {
                 if (character.MeleeWeaponSlot()?.Content == null)
                 {
-                    // 1. Try Specific Tags First
-                    Tag meleeTag = GameplayDataSettings.Tags.AllTags.FirstOrDefault(t => t.name == "Melee");
-                    if (meleeTag == null) meleeTag = GameplayDataSettings.Tags.AllTags.FirstOrDefault(t => t.name == "Weapon");
-
-                    var filter = new ItemFilter
+                    var item = await BloodMoon.AI.EnhancedWeaponManager.Instance.SpawnRandomMeleeWeapon();
+                    if (item != null)
                     {
-                        minQuality = 1,
-                        maxQuality = 5,
-                        requireTags = meleeTag != null ? new Tag[] { meleeTag } : null
-                    };
-                    
-                    int[]? ids = null;
-                    try 
-                    {
-                        ids = ItemAssetsCollection.Search(filter);
-                    }
-                    catch (System.Exception) 
-                    { 
-                        // Swallow search errors (like IndexOutOfRange from StringBuilder race conditions)
-                    }
-                    
-                    // 2. Fallback: Search Broadly if specific search failed
-                    if (ids == null || ids.Length == 0)
-                    {
-                        // Try searching for "Weapon" if we tried "Melee" before
-                        if (meleeTag != null && meleeTag.name == "Melee")
+                        var slot = character.MeleeWeaponSlot();
+                        if (slot != null && slot.CanPlug(item))
                         {
-                            var weaponTag = GameplayDataSettings.Tags.AllTags.FirstOrDefault(t => t.name == "Weapon");
-                            if (weaponTag != null)
+                            if (character.CharacterItem.Inventory.AddAndMerge(item))
                             {
-                                filter.requireTags = new Tag[] { weaponTag };
-                                try 
-                                {
-                                    ids = ItemAssetsCollection.Search(filter);
-                                }
-                                catch {}
+                                slot.Plug(item, out var _);
+                                return; 
                             }
                         }
+                        UnityEngine.Object.Destroy(item.gameObject);
                     }
-                    
-                    // 3. Desperate Fallback: Search EVERYTHING (No tags)
-                    if (ids == null || ids.Length == 0)
+                    else
                     {
-                        filter.requireTags = null; // Clear tags
-                        try 
-                        {
-                            ids = ItemAssetsCollection.Search(filter);
-                        }
-                        catch {}
+                        Debug.LogWarning($"[BloodMoon] Minion missing melee weapon: {character.name} (All searches failed)");
                     }
-
-                    if (ids != null && ids.Length > 0)
-                    {
-                        // Try up to 15 times to find a valid weapon (increased from 3)
-                        // Since we might be searching broadly, we need more attempts to hit a valid weapon
-                        int attempts = filter.requireTags == null ? 15 : 5;
-                        
-                        for(int i=0; i<attempts; i++)
-                        {
-                            int id = ids[UnityEngine.Random.Range(0, ids.Length)];
-                            var item = await ItemAssetsCollection.InstantiateAsync(id);
-                            if (item != null)
-                            {
-                                var slot = character.MeleeWeaponSlot();
-                                if (slot != null && slot.CanPlug(item))
-                                {
-                                    if (character.CharacterItem.Inventory.AddAndMerge(item))
-                                    {
-                                        slot.Plug(item, out var _);
-                                        return; // Success
-                                    }
-                                }
-                                UnityEngine.Object.Destroy(item.gameObject);
-                            }
-                        }
-                    }
-
-                    Debug.LogWarning($"[BloodMoon] Minion missing melee weapon: {character.name} (All searches failed)");
                 }
             }
             catch (System.Exception ex)
@@ -701,67 +648,34 @@ namespace BloodMoon
             {
                 if (character.PrimWeaponSlot()?.Content == null && character.SecWeaponSlot()?.Content == null)
                 {
-                    // 1. Try Specific Tags
-                    var filter = new ItemFilter
+                    var item = await BloodMoon.AI.EnhancedWeaponManager.Instance.SpawnRandomGun();
+                    if (item != null)
                     {
-                        minQuality = 1,
-                        maxQuality = 6,
-                        requireTags = new Tag[] { GameplayDataSettings.Tags.Gun }
-                    };
-                    
-                    int[]? ids = null;
-                    try
-                    {
-                        ids = ItemAssetsCollection.Search(filter);
-                    }
-                    catch {}
-                    
-                    // 2. Fallback: Broad Search if Gun tag fails (unlikely but safe)
-                    if (ids == null || ids.Length == 0)
-                    {
-                         filter.requireTags = null;
-                         try 
-                         {
-                             ids = ItemAssetsCollection.Search(filter);
-                         }
-                         catch {}
-                    }
-
-                    if (ids != null && ids.Length > 0)
-                    {
-                        int attempts = filter.requireTags == null ? 15 : 5;
+                        var pSlot = character.PrimWeaponSlot();
+                        var sSlot = character.SecWeaponSlot();
                         
-                        for(int i=0; i<attempts; i++)
+                        bool added = character.CharacterItem.Inventory.AddAndMerge(item);
+                        if (added)
                         {
-                            int id = ids[UnityEngine.Random.Range(0, ids.Length)];
-                            var item = await ItemAssetsCollection.InstantiateAsync(id);
-                            if (item != null)
+                            if (pSlot != null && pSlot.CanPlug(item))
                             {
-                                var pSlot = character.PrimWeaponSlot();
-                                var sSlot = character.SecWeaponSlot();
-                                
-                                bool added = character.CharacterItem.Inventory.AddAndMerge(item);
-                                if (added)
-                                {
-                                    if (pSlot != null && pSlot.CanPlug(item))
-                                    {
-                                        pSlot.Plug(item, out var _);
-                                        await AddAmmoForGun(character, item);
-                                        return;
-                                    }
-                                    else if (sSlot != null && sSlot.CanPlug(item))
-                                    {
-                                        sSlot.Plug(item, out var _);
-                                        await AddAmmoForGun(character, item);
-                                        return;
-                                    }
-                                }
-                                if (!added) UnityEngine.Object.Destroy(item.gameObject);
+                                pSlot.Plug(item, out var _);
+                                await AddAmmoForGun(character, item);
+                                return;
+                            }
+                            else if (sSlot != null && sSlot.CanPlug(item))
+                            {
+                                sSlot.Plug(item, out var _);
+                                await AddAmmoForGun(character, item);
+                                return;
                             }
                         }
+                        if (!added) UnityEngine.Object.Destroy(item.gameObject);
                     }
-
-                    Debug.LogWarning($"[BloodMoon] Minion missing guns: {character.name} (All searches failed)");
+                    else
+                    {
+                        Debug.LogWarning($"[BloodMoon] Minion missing guns: {character.name} (All searches failed)");
+                    }
                 }
             }
             catch (System.Exception ex)
@@ -772,27 +686,7 @@ namespace BloodMoon
 
         private async UniTask AddAmmoForGun(CharacterMainControl c, Item gun)
         {
-            try
-            {
-                var bullet = await ItemUtilities.GenerateBullet(gun);
-                if (bullet != null)
-                {
-                    bullet.StackCount = bullet.MaxStackCount; // Full stack
-                    c.CharacterItem.Inventory.AddAndMerge(bullet);
-                    
-                    // Add a few more stacks
-                    for(int i=0; i<2; i++)
-                    {
-                        var extra = await ItemUtilities.GenerateBullet(gun);
-                        if (extra != null)
-                        {
-                             extra.StackCount = extra.MaxStackCount;
-                             c.CharacterItem.Inventory.AddAndMerge(extra);
-                        }
-                    }
-                }
-            }
-            catch {}
+            await BloodMoon.AI.EnhancedWeaponManager.Instance.EnsureAmmo(c, gun);
         }
 
 
@@ -1020,15 +914,19 @@ namespace BloodMoon
                             bool found = false;
                             
                             // Simple Random Pick from Cache
-                            if (_pointsCache.Count > 0)
+                            if (_pointsCache != null && _pointsCache.Count > 0)
                             {
-                                var pt = _pointsCache[UnityEngine.Random.Range(0, _pointsCache.Count)];
-                                if (pt != null)
+                                try 
                                 {
-                                    anchor = pt.GetRandomPoint();
-                                    targetScene = pt.gameObject.scene.buildIndex;
-                                    found = true;
+                                    var pt = _pointsCache[UnityEngine.Random.Range(0, _pointsCache.Count)];
+                                    if (pt != null)
+                                    {
+                                        anchor = pt.GetRandomPoint();
+                                        targetScene = pt.gameObject.scene.buildIndex;
+                                        found = true;
+                                    }
                                 }
+                                catch {}
                             }
                             
                             if (!found)

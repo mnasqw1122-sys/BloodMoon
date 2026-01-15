@@ -101,23 +101,24 @@ namespace BloodMoon
             RenderSettings.fogMode = FogMode.ExponentialSquared; 
 
             // Pulse effect for "breathing" atmosphere
-            float pulse = Mathf.Sin(Time.time * 1.2f) * 0.15f + 1.0f; // 0.85 to 1.15
+            float pulse = Mathf.Sin(Time.time * 0.8f) * 0.2f + 1.0f; // 0.8 to 1.2, slower and deeper
             
             float t = _transitionProgress;
             
             // Color Gradient: Start normal, fade to Red
             Color bloodColor = _targetFogColor * pulse;
-            // Clamp brightness to avoid neon fog
-            bloodColor.r = Mathf.Clamp01(bloodColor.r); 
+            // Clamp brightness to avoid neon fog, but allow some overbright for bloom
+            bloodColor.r = Mathf.Clamp(bloodColor.r, 0f, 1.2f); 
             
             RenderSettings.fogColor = Color.Lerp(_origFogColor, bloodColor, t);
             
             // Density
-            float bloodDensity = _targetDensity * (pulse * 0.8f + 0.4f); // Vary density slightly
+            float bloodDensity = _targetDensity * (pulse * 0.5f + 0.5f); // Vary density more
             RenderSettings.fogDensity = Mathf.Lerp(_origFogDensity, bloodDensity, t);
             
             // Ambient Light: Darken the world to make the fog glow more prominent
-            Color bloodAmbient = new Color(0.25f, 0.05f, 0.05f);
+            // Pulse ambient inversely to fog (more fog = darker ambient)
+            Color bloodAmbient = new Color(0.2f, 0.02f, 0.02f) * (2.0f - pulse);
             RenderSettings.ambientLight = Color.Lerp(_origAmbient, bloodAmbient, t);
         }
 

@@ -7,12 +7,23 @@ using ItemStatsSystem;
 using Pathfinding;
 using System.Collections.Generic;
 using System.Linq;
+using BloodMoon.Utils;
+using BloodMoon.AI;
 
 namespace BloodMoon
 {
+    public enum AIRole
+    {
+        Standard,
+        Assault,
+        Sniper,
+        Support
+    }
+
     public class BloodMoonAIController : MonoBehaviour
     {
         // --- Components ---
+        public AIRole Role; // The role assigned to this AI
         private CharacterMainControl _c = null!;
         private AIDataStore _store = null!;
         private Seeker? _seeker;
@@ -22,6 +33,16 @@ namespace BloodMoon
         private AIContext _context = new AIContext();
         private List<AIAction> _actions = new List<AIAction>();
         private AIAction? _currentAction;
+        private NeuralDecisionMaker _neuralBrain = null!;
+        private StableBehaviorSystem _behaviorSystem = null!;
+        private float _globalCooldown = 0f;
+        private Dictionary<string, float> _actionSwitchCooldowns = new Dictionary<string, float>();
+        
+        private async UniTaskVoid FindWeaponsAsync()
+        {
+            if (_c == null) return;
+            await ComprehensiveWeaponSystem.Instance.FindWeaponsForAI(_c);
+        }
         
         // --- Movement & Pathfinding ---
         private int _currentWaypoint;
@@ -61,6 +82,8 @@ namespace BloodMoon
         private int _wingIndex = -1;
         public bool IsBoss;
 
+        public CharacterMainControl? CurrentTarget => _context.Target; // Exposed for SquadManager
+
         public void SetChaseDelay(float seconds)
         {
             _chaseDelayTimer = Mathf.Max(0f, seconds);
@@ -72,7 +95,29 @@ namespace BloodMoon
             _leader = leader;
             _wingIndex = index;
         }
+
+        private Squad? _currentSquad;
+        public void SetSquad(Squad? squad)
+        {
+            _currentSquad = squad;
+            if (squad != null)
+            {
+                // Update Squad Context
+                if (_context != null) _context.SquadOrder = SquadManager.Instance.GetOrder(this) ?? "";
+            }
+        }
+        
         private static readonly List<BloodMoonAIController> _all = new List<BloodMoonAIController>();
+        public static List<BloodMoonAIController> AllControllers => _all;
+
+        public bool HasWeapon => _c != null && (_c.PrimWeaponSlot()?.Content != null || _c.SecWeaponSlot()?.Content != null || _c.MeleeWeaponSlot()?.Content != null);
+        public float GetHealthPercentage() => _c != null ? _c.Health.CurrentHealth / _c.Health.MaxHealth : 0f;
+        
+        public void SetTacticalOrder(string order)
+        {
+            if (_context != null) _context.SquadOrder = order;
+        }
+
         private static readonly List<CharacterMainControl> _nearbyCache = new List<CharacterMainControl>();
         private static readonly Collider[] _nonAllocColliders = new Collider[16];
         private float _sepCooldown;
@@ -107,6 +152,18 @@ namespace BloodMoon
             _context.Character = _c;
             _context.Controller = this;
             _context.Store = _store;
+            _context.Personality = AIPersonality.GenerateRandom(); // Assign random personality
+            
+            // Determine Role based on Personality
+            if (_context.Personality.Aggression > 0.7f && _context.Personality.Caution < 0.4f) Role = AIRole.Assault;
+            else if (_context.Personality.Teamwork > 0.7f) Role = AIRole.Support;
+            else if (_context.Personality.Caution > 0.7f) Role = AIRole.Sniper;
+            else Role = AIRole.Standard;
+
+            // Debug Log Personality
+            #if DEBUG
+            Utils.Logger.Debug($"[AI {_c.name}] Created with Personality: {_context.Personality} | Role: {Role}");
+            #endif
             
             // Initialize Actions
             _actions.Add(new Action_Unstuck());
@@ -125,6 +182,17 @@ namespace BloodMoon
             _actions.Add(new Action_Patrol());
             _actions.Add(new Action_Panic());
 
+            // Initialize Neural Brain
+            var actionNames = _actions.Select(a => a.Name).ToList();
+            _neuralBrain = new ContextAwareDecisionMaker(actionNames);
+
+            // Initialize Behavior System
+            _behaviorSystem = new StableBehaviorSystem();
+            _behaviorSystem.Initialize();
+
+            // Find Weapons (Async)
+            FindWeaponsAsync().Forget();
+
             var preset = c.characterPreset;
             if (preset != null && preset.GetCharacterIcon() == GameplayDataSettings.UIStyle.BossCharacterIcon)
             {
@@ -133,6 +201,8 @@ namespace BloodMoon
             
             // Randomize tick offset to distribute CPU load
             _aiTickTimer = Random.Range(0f, AI_TICK_INTERVAL);
+            
+            if (SquadManager.Instance != null) SquadManager.Instance.RegisterAI(this);
         }
 
         private float _aiTickTimer;
@@ -140,7 +210,11 @@ namespace BloodMoon
 
         private void Update()
         {
-            if (!LevelManager.LevelInited || _c == null || CharacterMainControl.Main == null) return;
+            if (!LevelManager.LevelInited || _c == null || CharacterMainControl.Main == null) 
+            {
+                if (_c == null) enabled = false;
+                return;
+            }
             
             // Safeguard: Ensure vanilla AI stays disabled
             var vanilla = _c.GetComponent<AICharacterController>();
@@ -167,49 +241,101 @@ namespace BloodMoon
                 // Cooldowns (Update based on interval)
                 foreach (var a in _actions) a.UpdateCooldown(AI_TICK_INTERVAL);
                 
-                // Decision Logic with behavior persistence
-                AIAction? bestAction = null;
-                float bestScore = -1f;
-                
-                foreach (var action in _actions)
+                // Update switching cooldowns
+                var keys = new List<string>(_actionSwitchCooldowns.Keys);
+                foreach(var k in keys) 
                 {
-                    float score = action.Evaluate(_context);
-                    if (score > bestScore)
-                    {
-                        bestScore = score;
-                        bestAction = action;
-                    }
+                    _actionSwitchCooldowns[k] -= AI_TICK_INTERVAL;
+                    if (_actionSwitchCooldowns[k] <= 0) _actionSwitchCooldowns.Remove(k);
                 }
-                
-                bool shouldSwitchAction = false;
-                
-                if (bestAction != null && bestAction != _currentAction)
+
+                if (_globalCooldown <= 0f)
                 {
-                    // Check if current action can be interrupted
-                    if (_currentAction == null || _currentAction.CanBeInterrupted())
+                    // Decision Logic with behavior persistence
+                    AIAction? bestAction = null;
+                    float bestScore = -1f;
+                    
+                    // Get Neural Scores (Experimental)
+                    var neuralScores = _neuralBrain.GetActionScores(_context);
+
+                    Dictionary<string, float> allScores = new Dictionary<string, float>();
+
+                    foreach (var action in _actions)
                     {
-                        // Only switch if the new action is significantly better
-                        // This prevents frequent switching between similar-scoring actions
-                        float currentScore = _currentAction?.Evaluate(_context) ?? -1f;
-                        float scoreDifference = bestScore - currentScore;
+                        // Check switch cooldown
+                        if (_actionSwitchCooldowns.ContainsKey(action.Name)) 
+                        {
+                            allScores[action.Name] = -1f;
+                            continue;
+                        }
+
+                        float score = action.Evaluate(_context);
                         
-                        // Require a minimum score difference to switch actions
-                        const float MIN_SCORE_DIFFERENCE = 0.1f;
-                        shouldSwitchAction = scoreDifference > MIN_SCORE_DIFFERENCE;
+                        // Hybrid Decision: Rule Base (90%) + Neural Net (10%)
+                        if (neuralScores.TryGetValue(action.Name, out float nScore))
+                        {
+                            // Dynamic Weight: Increase neural influence over time (up to 40% after 5 mins)
+                            float neuralWeight = Mathf.Lerp(0.1f, 0.4f, Mathf.Clamp01(_aliveTime / 300f));
+                            score = score * (1f - neuralWeight) + nScore * neuralWeight;
+                        }
+                        
+                        allScores[action.Name] = score;
+
+                        if (score > bestScore)
+                        {
+                            bestScore = score;
+                            bestAction = action;
+                        }
                     }
-                }
-                
-                // Check if current action should exit
-                if (_currentAction != null && _currentAction.ShouldExit())
-                {
-                    shouldSwitchAction = true;
-                }
-                
-                if (shouldSwitchAction && bestAction != null)
-                {
-                    if (_currentAction != null) _currentAction.OnExit(_context);
-                    _currentAction = bestAction;
-                    _currentAction.OnEnter(_context);
+                    
+                    // Use StableBehaviorSystem
+                    string proposedActionName = bestAction?.Name ?? (_currentAction?.Name ?? "Patrol");
+                    
+                    List<string> availableActions = _actions.Select(a => a.Name).ToList();
+                    string stableActionName = _behaviorSystem.GetStableAction(proposedActionName, bestScore, _context, availableActions, allScores);
+                    
+                    AIAction? stableAction = _actions.FirstOrDefault(a => a.Name == stableActionName);
+                    if (stableAction == null) stableAction = bestAction;
+                    
+                    bool shouldSwitchAction = false;
+                    
+                    if (stableAction != null && stableAction != _currentAction)
+                    {
+                        // Check if current action can be interrupted
+                        if (_currentAction == null || _currentAction.CanBeInterrupted())
+                        {
+                            shouldSwitchAction = true;
+                        }
+                    }
+                    
+                    // Check if current action should exit
+                    if (_currentAction != null && _currentAction.ShouldExit())
+                    {
+                        shouldSwitchAction = true;
+                        // If forced to exit, pick the best raw action if stable action is still the current one
+                        if (stableAction == _currentAction) stableAction = bestAction;
+                    }
+                    
+                    if (shouldSwitchAction && stableAction != null && stableAction != _currentAction)
+                    {
+                        if (_currentAction != null) 
+                        {
+                            _currentAction.OnExit(_context);
+                            // Set cooldown for the OLD action so we don't switch back immediately
+                            _actionSwitchCooldowns[_currentAction.Name] = 2.0f;
+                        }
+                        
+                        // Set Global Cooldown
+                        _globalCooldown = 0.5f;
+
+                        // Debug Log for Action Switch
+                        #if DEBUG
+                        BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Switch Action: {_currentAction?.Name ?? "None"} -> {stableAction.Name}");
+                        #endif
+
+                        _currentAction = stableAction;
+                        _currentAction.OnEnter(_context);
+                    }
                 }
             }
             
@@ -227,6 +353,7 @@ namespace BloodMoon
             _dashCooldown -= Time.deltaTime;
             _skillCooldown -= Time.deltaTime;
             _fireHoldTimer -= Time.deltaTime;
+            _globalCooldown -= Time.deltaTime;
             _pressureScore = Mathf.Max(0f, _pressureScore - Time.deltaTime * 0.5f);
             
             if (!_canChase)
@@ -582,6 +709,18 @@ namespace BloodMoon
             bool isShotgun = gun != null && gun.BulletCount < 10 && gun.BulletDistance < 20f; // Heuristic
             
             Vector3 aimPos = PredictAim(_context.Target);
+            
+            // Apply Difficulty-based Inaccuracy
+            if (AdaptiveDifficulty.Instance != null)
+            {
+                float accMult = AdaptiveDifficulty.Instance.AccuracyMultiplier;
+                // Add noise based on difficulty (1.0 = normal, 0.8 = accurate, 1.2 = inaccurate)
+                // If multiplier < 1 (harder), noise is reduced.
+                // Base noise radius e.g. 0.5m
+                float noise = 0.5f * accMult;
+                aimPos += Random.insideUnitSphere * noise;
+            }
+            
             _c.SetAimPoint(aimPos);
             
             // Movement during combat (Strafing)
@@ -981,13 +1120,13 @@ namespace BloodMoon
         {
             if (_seeker == null) return (targetPos - _c.transform.position).normalized;
 
-            // Door / Stuck Check Logic (Reduced frequency)
-            if (Time.time - _stuckCheckInterval > 2.0f) // Increased from 1.0f
+            // Door / Stuck Check Logic (Optimized frequency)
+            if (Time.time - _stuckCheckInterval > 3.0f) // Increased from 2.0f to reduce checks
             {
                 _stuckCheckInterval = Time.time;
                 if (Vector3.Distance(_c.transform.position, _lastDoorCheckPos) < 0.5f)
                 {
-                    _doorStuckTimer += 2.0f; // Increased from 1.0f
+                    _doorStuckTimer += 3.0f; // Increased from 2.0f
                 }
                 else
                 {
@@ -995,7 +1134,7 @@ namespace BloodMoon
                     _lastDoorCheckPos = _c.transform.position;
                 }
 
-                if (_doorStuckTimer > 6.0f) // Increased from 3.0f
+                if (_doorStuckTimer > 9.0f) // Increased from 6.0f
                 {
                     _context.IsStuck = true; // Signal Unstuck Action
                     _doorStuckTimer = 0f;
@@ -1005,42 +1144,71 @@ namespace BloodMoon
                 }
             }
 
-            // Simplified target validation
+            // Optimized target validation with distance thresholds
             float distToTarget = Vector3.Distance(_c.transform.position, targetPos);
-            if (distToTarget > 100f) // Only validate if target is very far
+            
+            // Tiered distance logic for performance optimization
+            if (distToTarget > 150f) // Very far - use simple movement
             {
-                // Target is too far, use simpler movement
+                // Target is very far, use simpler movement without pathfinding
+                return (targetPos - _c.transform.position).normalized;
+            }
+            else if (distToTarget < 3f) // Very close - no need for pathfinding
+            {
+                // Target is very close, move directly
                 return (targetPos - _c.transform.position).normalized;
             }
 
             _repathTimer -= Time.deltaTime;
             bool shouldRepath = false;
             
-            // Reduced frequency of pathfinding
-            if (_path == null || !_path.vectorPath.Any() || _path.error)
+            // Optimized pathfinding frequency with multiple checks
+            if (_path == null || _path.vectorPath == null || _path.vectorPath.Count == 0 || _path.error)
             {
                 shouldRepath = true;
+                BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Path invalid, requesting repath");
             }
             else if (_repathTimer <= 0f)
             {
-                shouldRepath = true;
+                // Only repath if target has moved significantly
+                float targetMoveDist = Vector3.Distance(_lastPathTarget, targetPos);
+                if (targetMoveDist > 5f) // Increased from 3f to reduce unnecessary repaths
+                {
+                    shouldRepath = true;
+                    BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Target moved {targetMoveDist:F1}m, requesting repath");
+                }
+                else
+                {
+                    // Extend repath timer since target hasn't moved much
+                    _repathTimer = 1.0f;
+                }
             }
-            else if (Vector3.Distance(targetPos, _lastPathTarget) > 3.0f) // Increased from 2.0f
+            // Simplified path validity check with larger tolerance
+            else if (_path.vectorPath.Count > 0 && Vector3.Distance(_c.transform.position, _path.vectorPath[0]) > 20f) // Increased from 15f
             {
                 shouldRepath = true;
-            }
-            // Simplified path validity check
-            else if (_path.vectorPath.Count > 0 && Vector3.Distance(_c.transform.position, _path.vectorPath[0]) > 15f) // Increased from 10f
-            {
-                shouldRepath = true;
+                BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Far from path start ({Vector3.Distance(_c.transform.position, _path.vectorPath[0]):F1}m), requesting repath");
             }
 
             if (shouldRepath && !_waitingForPath)
             {
+                // Performance optimization: skip pathfinding if too many AI are already pathfinding
+                if (BloodMoon.AI.RuntimeMonitor.Instance != null && 
+                    BloodMoon.AI.RuntimeMonitor.Instance.ConcurrentPathfindingCount > 5)
+                {
+                    BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Too many concurrent pathfinding ({BloodMoon.AI.RuntimeMonitor.Instance.ConcurrentPathfindingCount}), using fallback");
+                    return (targetPos - _c.transform.position).normalized;
+                }
+                
                 _lastPathTarget = targetPos;
-                _repathTimer = 2.0f; // Increased from 1.0f to reduce pathfinding load
+                _repathTimer = 3.0f; // Increased from 2.0f to further reduce pathfinding load
                 _waitingForPath = true;
+                
+                // Start pathfinding with performance monitoring
+                BloodMoon.AI.RuntimeMonitor.Instance?.IncrementPathfindingCount();
                 _seeker.StartPath(_c.transform.position, targetPos, OnPathComplete);
+                
+                BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Starting path to target {distToTarget:F1}m away");
             }
 
             if (_path == null || _path.vectorPath == null || _path.vectorPath.Count == 0 || _path.error)
@@ -1123,7 +1291,13 @@ namespace BloodMoon
                 return Vector3.zero;
             }
 
-            // Get direction to next waypoint
+            // Get direction to next waypoint (with safety check)
+            if (_currentWaypoint < 0 || _currentWaypoint >= _path.vectorPath.Count)
+            {
+                BloodMoon.Utils.Logger.Warning($"[AI {_c.name}] Invalid waypoint index: {_currentWaypoint}, path count: {_path.vectorPath.Count}");
+                return Vector3.zero;
+            }
+            
             Vector3 dirToWaypoint = (_path.vectorPath[_currentWaypoint] - _c.transform.position).normalized;
             
             // Check if waypoint is reachable (simple raycast check)
@@ -1197,10 +1371,18 @@ namespace BloodMoon
 
         private void OnPathComplete(Path p)
         {
+            // Decrement concurrent pathfinding count
+            BloodMoon.AI.RuntimeMonitor.Instance?.DecrementPathfindingCount();
+            
             if (!p.error)
             {
                 _path = p;
                 _currentWaypoint = 0;
+                BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Path completed successfully, waypoints: {p.vectorPath?.Count ?? 0}");
+            }
+            else
+            {
+                BloodMoon.Utils.Logger.Warning($"[AI {_c.name}] Path failed: {p.errorLog}");
             }
             _waitingForPath = false;
         }
@@ -1452,7 +1634,7 @@ namespace BloodMoon
             _hurtRecently = true;
             _pressureScore += 2f;
             _context.Pressure = _pressureScore;
-            
+
             if (_store != null)
             {
                 // Mark this spot as dangerous
@@ -1462,6 +1644,16 @@ namespace BloodMoon
         
         private void OnDeadAI(DamageInfo dmg)
         {
+            if (_neuralBrain != null)
+            {
+                _neuralBrain.ReportPerformance(_aliveTime, 0, 0); 
+            }
+
+            if (SquadManager.Instance != null) SquadManager.Instance.UnregisterAI(this);
+            
+            // Assume player kill if AI dies for now (simplification)
+            if (AdaptiveDifficulty.Instance != null) AdaptiveDifficulty.Instance.ReportPlayerKill();
+
             if (_c != null)
             {
                 _store.RegisterDeath(_c.transform.position);
@@ -1675,6 +1867,7 @@ namespace BloodMoon
         
         private void OnDestroy()
         {
+            if (SquadManager.Instance != null) SquadManager.Instance.UnregisterAI(this);
             _all.Remove(this);
         }
     }

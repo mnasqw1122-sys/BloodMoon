@@ -38,21 +38,48 @@ namespace BloodMoon
         }
 
         private string _lastTimeStr = string.Empty;
+        private Color _baseColor = new Color(1f, 0.2f, 0.2f); // Red
+        private Color _activeColor = new Color(1f, 0f, 0f); // Deep Red
 
         public void Refresh(TimeSpan now)
         {
             if (_title == null) return;
             var eta = _event.GetETA(now);
-            var active = _event.IsActive(now);
+            bool active = _event.IsActive(now);
             var remain = active ? _event.GetOverETA(now) : eta;
             var label = active ? Localization.Get("Event_Active") : Localization.Get("Event_Incoming");
             var timeStr = $"{Mathf.FloorToInt((float)remain.TotalHours):000}:{remain.Minutes:00}";
             
-            var fullStr = string.Format(Localization.Get("UI_Format"), label, timeStr);
+            // 1. Text Content
+            string difficultyStr = "";
+            if (BloodMoon.AI.AdaptiveDifficulty.Instance != null)
+            {
+                float diff = BloodMoon.AI.AdaptiveDifficulty.Instance.DifficultyScore;
+                string diffLabel = diff > 1.5f ? "EXTREME" : (diff > 1.1f ? "HARD" : (diff < 0.8f ? "EASY" : "NORMAL"));
+                difficultyStr = $"\nTHREAT: {diffLabel} ({diff:F1})";
+            }
+
+            var fullStr = string.Format(Localization.Get("UI_Format"), label, timeStr) + difficultyStr;
             if (fullStr != _lastTimeStr)
             {
                 _title.text = fullStr;
                 _lastTimeStr = fullStr;
+            }
+
+            // 2. Visual Effects (Pulse)
+            float pulseSpeed = active ? 4.0f : 1.0f;
+            float alpha = Mathf.PingPong(Time.time * pulseSpeed, 0.5f) + 0.5f; // 0.5 to 1.0
+            
+            if (active)
+            {
+                _title.color = new Color(_activeColor.r, _activeColor.g, _activeColor.b, alpha);
+                // Shake effect if very active
+                _title.rectTransform.anchoredPosition += UnityEngine.Random.insideUnitCircle * 0.5f;
+            }
+            else
+            {
+                // Orange/Yellow warning
+                _title.color = new Color(1f, 0.6f, 0f, alpha);
             }
         }
 

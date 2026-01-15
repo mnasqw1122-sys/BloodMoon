@@ -3,6 +3,7 @@ using Duckov;
 using Duckov.Utilities;
 using Duckov.ItemUsage;
 using System.Collections.Generic;
+using ItemStatsSystem;
 
 namespace BloodMoon
 {
@@ -13,6 +14,8 @@ namespace BloodMoon
         public BloodMoonAIController? Controller;
         public AIDataStore? Store;
         public CharacterMainControl? Target;
+        public AIPersonality Personality = new AIPersonality(); // Default
+        public AIRole Role = AIRole.Standard;
         
         // Target Persistence
         private float _targetSwitchCooldown;
@@ -34,12 +37,22 @@ namespace BloodMoon
         public bool IsStuck;
         public bool CanChase;
         
+        // Weapon State
+        public Item? PrimaryWeapon;
+        public Item? SecondaryWeapon;
+        public Item? MeleeWeapon;
+        public Item? ThrowableWeapon;
+        public int AmmoCount;
+        public float HealthPercentage;
+        public bool IsInCombat => Pressure > 0 || HasLoS;
+        
         // Target State
         public bool TargetIsReloading;
         public bool TargetIsHealing;
 
         public bool IsBoss => Controller != null && Controller.IsBoss;
         public bool IsRaged => Controller != null && Controller.IsRaged;
+        public string SquadOrder = string.Empty; // Order from SquadManager (e.g., "Flank", "Suppress")
 
         // Static Cache for Target Acquisition (Deprecated in favor of Store.AllCharacters)
         private static List<CharacterMainControl> _cachedCharacters = new List<CharacterMainControl>();
@@ -219,12 +232,35 @@ namespace BloodMoon
             Pressure = Mathf.Max(0f, Pressure - Time.deltaTime * 0.5f);
             
             // Check Health
-            IsHurt = Character.Health.CurrentHealth < Character.Health.MaxHealth * 0.4f;
+            HealthPercentage = Character.Health.CurrentHealth / Character.Health.MaxHealth;
+            IsHurt = HealthPercentage < 0.4f;
             
-            // Check Ammo
+            // Check Ammo & Weapons
             var gun = Character.GetGun();
+            AmmoCount = gun != null ? gun.BulletCount : 0;
             IsLowAmmo = gun != null && gun.BulletCount < (gun.Capacity * 0.2f);
             IsReloading = gun != null && gun.IsReloading();
+            
+            PrimaryWeapon = Character.PrimWeaponSlot()?.Content;
+            SecondaryWeapon = Character.SecWeaponSlot()?.Content;
+            MeleeWeapon = Character.MeleeWeaponSlot()?.Content;
+            
+            // Check for throwable/skill item
+            ThrowableWeapon = null;
+            var inv = Character.CharacterItem?.Inventory;
+            if (inv != null)
+            {
+                foreach(var item in inv) 
+                {
+                    if(item == null) continue;
+                    var ss = item.GetComponent<ItemSetting_Skill>();
+                    if(ss != null && ss.Skill != null && !item.GetComponent<Drug>()) 
+                    {
+                        ThrowableWeapon = item;
+                        break;
+                    }
+                }
+            }
             
             // Check Target State
             var tGun = Target.GetGun();
@@ -235,6 +271,7 @@ namespace BloodMoon
             if (Controller != null)
             {
                 CanChase = Controller.CanChase;
+                Role = Controller.Role;
             }
         }
     }
@@ -365,10 +402,9 @@ namespace BloodMoon
             if (ctx.Pressure > 1.0f) urgency -= pressurePenalty;
             if (ctx.Pressure > 3.0f) urgency -= pressurePenalty * 2f; // Double penalty when under heavy fire
             
-            // 4. Personality Variation (Randomness)
-            // Use ID to create a fixed random offset for this agent
-            float personality = (ctx.Character.GetInstanceID() % 100) / 1000.0f; // 0.0 to 0.1
-            urgency += personality; 
+            // 4. Personality Variation
+            float personalityBonus = ctx.Personality.Caution * 0.2f; 
+            urgency += personalityBonus;
             
             return Mathf.Clamp01(urgency);
         }
@@ -409,6 +445,18 @@ namespace BloodMoon
             if (ctx.IsRaged && ctx.HasLoS && ctx.DistToTarget < 15f)
             {
                 return 0.85f;
+            }
+
+            // Personality: Aggressive agents like to rush
+            if (ctx.Personality.Aggression > 0.8f && ctx.HasLoS && ctx.DistToTarget < 25f)
+            {
+                return 0.5f * ctx.Personality.Aggression;
+            }
+
+            // Role Bonus: Assault
+            if (ctx.Role == AIRole.Assault && ctx.HasLoS && ctx.DistToTarget < 20f)
+            {
+                return 0.6f;
             }
 
             return 0f;
@@ -557,11 +605,15 @@ namespace BloodMoon
                 // Check if anyone else is engaging?
                 int engaging = ctx.Store.GetEngagementCount(ctx.Target);
                 // If we are part of a group (2+), one should suppress
-                // Simple role assignment: ID based or Random?
-                // Let's use distance: Farthest ally suppresses
+                // Use Personality: High Teamwork agents prefer suppression
                 if (engaging > 0 && ctx.DistToTarget > 20f && ctx.HasLoS)
                 {
-                    return 0.7f;
+                    float score = 0.6f + ctx.Personality.Teamwork * 0.3f; // Up to 0.9 for high teamwork
+                    
+                    // Role Bonus: Support
+                    if (ctx.Role == AIRole.Support) score += 0.2f;
+                    
+                    return score;
                 }
             }
 
@@ -751,6 +803,9 @@ namespace BloodMoon
         {
             if (ctx.Character == null || ctx.Target == null) return 0f;
 
+            // Squad Order Override
+            if (ctx.SquadOrder == "Flank") return 0.95f;
+
             // 1. Basic Flanking Condition: Good health, some distance
             float hp = ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth;
             if (hp < 0.4f) return 0f; // Don't flank if injured
@@ -761,6 +816,9 @@ namespace BloodMoon
                 int engaging = ctx.Store.GetEngagementCount(ctx.Target);
                 // If 2+ allies are engaging, or 1 ally is suppressing, we should flank
                 if (engaging >= 2) return 0.75f;
+                
+                // Role Bonus: Assault loves to flank if someone else is engaging
+                if (ctx.Role == AIRole.Assault && engaging >= 1) return 0.8f;
             }
             
             // 3. Situational: If we have LoS but are at suboptimal range/angle

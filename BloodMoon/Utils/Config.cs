@@ -1,31 +1,90 @@
 using System;
+using System.IO;
 using UnityEngine;
 
 namespace BloodMoon.Utils
 {
-    // Hardcoded configuration as per request. No file I/O.
+    [Serializable]
     public class ModConfig
     {
-        // Fixed Values
-        public float SleepHours { get; } = 160f;
-        public float ActiveHours { get; } = 48f;
-        public float BossHealthMultiplier { get; } = 5.0f;
-        public float MinionHealthMultiplier { get; } = 2.0f;
-        public int BossMinionCount { get; } = 5;
-        public float BossHeadArmor { get; } = 6f;
-        public float BossBodyArmor { get; } = 8f;
-        public float MinionHeadArmor { get; } = 5f;
-        public float MinionBodyArmor { get; } = 6f;
-        public bool EnableBossGlow { get; } = true;
-        public string Language { get; } = "zh-CN";
-        public int BossCount { get; } = 5; // New config for BOSS count
+        // Public fields for JsonUtility serialization
+        public float SleepHours = 160f;
+        public float ActiveHours = 48f;
+        
+        // Boss Settings
+        public int BossCount = 5;
+        public int BossMinionCount = 5;
+        public float BossHealthMultiplier = 5.0f;
+        public float MinionHealthMultiplier = 2.0f;
+        public float BossHeadArmor = 6f;
+        public float BossBodyArmor = 8f;
+        public float MinionHeadArmor = 5f;
+        public float MinionBodyArmor = 6f;
+        public bool EnableBossGlow = true;
+        
+        // General Settings
+        public string Language = "zh-CN";
 
-        // Singleton instance (Lazy load unnecessary now but kept for compatibility)
-        private static readonly ModConfig _instance = new ModConfig();
-        public static ModConfig Instance => _instance;
+        // Static singleton
+        private static ModConfig _instance = null!;
+        public static ModConfig Instance
+        {
+            get
+            {
+                if (_instance == null) _instance = new ModConfig();
+                return _instance;
+            }
+        }
 
-        // Methods are no-ops or removed
-        public static void Load() { }
-        public static void Save() { }
+        private static string _configPath = string.Empty;
+
+        public static void Initialize(string modDirectory)
+        {
+            _configPath = Path.Combine(modDirectory, "BloodMoonConfig.json");
+            Load();
+        }
+
+        public static void Load()
+        {
+            if (string.IsNullOrEmpty(_configPath)) return;
+
+            if (File.Exists(_configPath))
+            {
+                try
+                {
+                    string json = File.ReadAllText(_configPath);
+                    _instance = JsonUtility.FromJson<ModConfig>(json);
+                    if (_instance == null) _instance = new ModConfig();
+                    Logger.Log("Configuration loaded successfully.");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"Failed to load config: {ex.Message}");
+                    _instance = new ModConfig(); // Fallback to default
+                }
+            }
+            else
+            {
+                Logger.Log("Configuration file not found. Creating default.");
+                _instance = new ModConfig();
+                Save();
+            }
+        }
+
+        public static void Save()
+        {
+            if (string.IsNullOrEmpty(_configPath) || _instance == null) return;
+
+            try
+            {
+                string json = JsonUtility.ToJson(_instance, true);
+                File.WriteAllText(_configPath, json);
+                Logger.Log("Configuration saved.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Failed to save config: {ex.Message}");
+            }
+        }
     }
 }

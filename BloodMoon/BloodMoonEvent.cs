@@ -57,7 +57,8 @@ namespace BloodMoon
         public bool IsActive(TimeSpan now)
         {
             long pos = (now.Ticks + _offsetTicks) % Period;
-            return pos >= SleepTime.Ticks;
+            bool active = pos >= SleepTime.Ticks;
+            return active;
         }
 
         public TimeSpan GetETA(TimeSpan now)
