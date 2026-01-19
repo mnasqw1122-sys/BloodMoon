@@ -39,7 +39,7 @@ namespace BloodMoon.AI
                 adjustedScores[kvp.Key] = adjustedScore;
             }
             
-            // Force constraints
+            // 强制约束
             EnforceContextConstraints(adjustedScores, ctx);
             
             return adjustedScores;
@@ -65,12 +65,12 @@ namespace BloodMoon.AI
         {
             float multiplier = 1.0f;
             
-            // Adjust based on weapon state
+            // 根据武器状态进行调整
             if (action == "Reload" || action == "Shoot" || action == "Suppress")
             {
                 if (!_currentState.HasPrimaryWeapon && !_currentState.HasSecondaryWeapon)
                 {
-                    // Drastically reduce weapon actions if no weapon
+                    // 如果没有武器，则大幅减少武器动作
                     multiplier = 0.1f;
                 }
                 else if (_currentState.AmmoCount == 0)
@@ -80,7 +80,7 @@ namespace BloodMoon.AI
                 }
             }
             
-            // Adjust based on health
+            // 根据健康状况进行调整
             if (action == "Heal" || action == "Retreat" || action == "Panic")
             {
                 if (_currentState.HealthPercentage < 0.3f)
@@ -95,13 +95,13 @@ namespace BloodMoon.AI
                 }
             }
             
-            // Adjust based on stuck state
+            // 根据卡住状态进行调整
             if (action == "Unstuck")
             {
                 multiplier = _currentState.IsStuck ? 1.5f : 0.2f;
             }
             
-            // Adjust based on combat state
+            // 根据战斗状态进行调整
             if (action == "Engage" || action == "Flank" || action == "TakeCover")
             {
                 multiplier = _currentState.IsInCombat ? 1.2f : 0.7f;
@@ -112,7 +112,7 @@ namespace BloodMoon.AI
         
         private void EnforceContextConstraints(Dictionary<string, float> scores, AIContext ctx)
         {
-            // Force remove weapon actions if no weapon
+            // 如果没有武器，则强制移除武器动作
             if (!_currentState.HasPrimaryWeapon && !_currentState.HasSecondaryWeapon)
             {
                 string[] weaponActions = { "Reload", "Shoot", "Suppress", "ThrowGrenade" };
@@ -125,15 +125,15 @@ namespace BloodMoon.AI
                 }
             }
             
-            // Force remove melee actions if no melee weapon
-            // (Assuming "MeleeAttack" is an action, though currently it's "Engage" handling it)
-            // But if we had specific melee action:
+            // 如果没有近战武器，则强制移除近战动作
+            // （假设“MeleeAttack”是一个动作，尽管目前由“Engage”来处理它）
+            // 但是如果我们有特定的近战动作：
             if (!_currentState.HasMeleeWeapon)
             {
-                // If we had a specific melee action key
+                // 如果我们有一个特定的近战动作键
             }
             
-            // If high health, reduce heal to zero unless holding a buff item?
+            // 如果生命值较高，是否应将治疗效果降低至零，除非持有增益物品？
             if (_currentState.HealthPercentage > 0.9f)
             {
                 if (scores.ContainsKey("Heal"))

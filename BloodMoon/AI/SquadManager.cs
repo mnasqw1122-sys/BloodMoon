@@ -14,7 +14,7 @@ namespace BloodMoon.AI
         public CharacterMainControl? Target;
         public Vector3 SquadCenter;
         
-        // Orders
+        // 命令
         public Dictionary<BloodMoonAIController, string> MemberOrders = new Dictionary<BloodMoonAIController, string>();
 
         public void AddMember(BloodMoonAIController member)
@@ -71,7 +71,7 @@ namespace BloodMoon.AI
         {
             if (_unassigned.Contains(ai)) _unassigned.Remove(ai);
             
-            // Remove from squads
+            // 从队伍中移除
             foreach (var squad in _squads)
             {
                 if (squad.Members.Contains(ai))
@@ -79,7 +79,7 @@ namespace BloodMoon.AI
                     squad.RemoveMember(ai);
                     if (squad.Leader == ai)
                     {
-                        // Elect new leader or disband
+                        // 选择新王或解散
                         if (squad.Members.Count > 0) squad.Leader = squad.Members[0];
                     }
                 }
@@ -92,23 +92,23 @@ namespace BloodMoon.AI
             if (_updateTimer < 1.0f) return;
             _updateTimer = 0f;
 
-            // 1. Manage Squads
+            // 1. 管理小队
             ManageSquads();
 
-            // 2. Issue Orders
+            // 2. 发布命令
             _coordinator.UpdateSquadCoordination();
 
-            // Cleanup empty squads
+            // 清理空小队
             _squads.RemoveAll(s => !s.IsValid() || s.Members.Count == 0);
         }
 
         private void ManageSquads()
         {
-            // Try to form squads from unassigned
+            // 尽量从未分配人员中组建小队
             if (_unassigned.Count < 2) return;
 
-            // Simple clustering
-            // Pick a random unassigned, find neighbors
+            // 简单聚类
+            // 随机选择一个未分配的节点，找到其邻居
             for (int i = _unassigned.Count - 1; i >= 0; i--)
             {
                 var candidate = _unassigned[i];
@@ -120,23 +120,23 @@ namespace BloodMoon.AI
 
                 var nearby = _unassigned.Where(other => other != candidate && other != null && Vector3.Distance(other.transform.position, candidate.transform.position) < 15f).ToList();
                 
-                if (nearby.Count >= 2) // Found a potential trio
+                if (nearby.Count >= 2) // 发现了一个潜在的三人组合
                 {
                     var newSquad = new Squad { ID = _nextSquadId++ };
-                    newSquad.Leader = candidate; // Default leader
+                    newSquad.Leader = candidate; // 默认王
                     
-                    // Add candidate
+                    // 添加候选人
                     newSquad.AddMember(candidate);
                     _unassigned.RemoveAt(i);
 
-                    // Add neighbors
+                    // 添加邻居
                     foreach (var n in nearby)
                     {
                         newSquad.AddMember(n);
                         _unassigned.Remove(n);
                     }
 
-                    // Elect best leader (Boss > High HP > Random)
+                    // 选择最佳领袖（王 > 高生命值 > 随机）
                     var boss = newSquad.Members.FirstOrDefault(m => m.IsBoss);
                     if (boss != null) newSquad.Leader = boss;
                     
@@ -144,7 +144,7 @@ namespace BloodMoon.AI
                     _coordinator.RegisterSquad(newSquad);
                     BloodMoon.Utils.Logger.Debug($"Formed Squad {newSquad.ID} with {newSquad.Members.Count} members");
                     
-                    // Break to avoid modifying list while iterating too much (though we iterate backwards, neighbors removal might affect indices, but simple approach is fine for now)
+                    // 拆分以避免在迭代过程中过多修改列表（尽管我们是反向迭代，但邻居的移除可能会影响索引，不过目前简单的方法就足够了）
                     break; 
                 }
             }
@@ -152,17 +152,17 @@ namespace BloodMoon.AI
 
         private void UpdateSquadTactics(Squad squad)
         {
-            // Update Center
+            // 更新中心
             Vector3 center = Vector3.zero;
             foreach (var m in squad.Members) center += m.transform.position;
             squad.SquadCenter = center / squad.Members.Count;
 
-            // Determine Target (Leader's target)
-            // We need access to AIContext, but that's internal. 
-            // We'll rely on a public property or method we will add to Controller.
-            // For now, assume we can get it or just pick one.
+            // 确定目标（王的目标）
+            // 我们需要访问AIContext，但这是内部的。
+            // 我们将依赖于我们将添加到Controller的公共属性或方法。
+            // 目前，假设我们可以获取它或只是选择一个。
             
-            // Let's assume we add `public CharacterMainControl CurrentTarget` to controller
+            // 假设我们添加 `public CharacterMainControl CurrentTarget` 到控制器
             if (squad.Leader != null)
             {
                 squad.Target = squad.Leader.CurrentTarget;
@@ -170,21 +170,21 @@ namespace BloodMoon.AI
 
             if (squad.Target == null) return;
 
-            // Assign Roles
-            // 1 Flanker, 1 Suppressor, Rest Assault
+            // 分配角色
+            // 1名侧翼支援兵，1名压制兵，其余为突击兵
             
             int flankers = 0;
             int suppressors = 0;
             
             foreach (var member in squad.Members)
             {
-                if (member == squad.Leader) continue; // Leader does what they want
+                if (member == squad.Leader) continue; // 王想做什么就做什么
 
                 string order = "Assault";
 
-                // Logic:
-                // If we need flanker and member is Assault/Sniper role -> Flank
-                // If we need suppressor and member is Support/Standard -> Suppress
+                // 逻辑：
+                // 如果我们需要侧翼支援兵且成员是突击/狙击角色 ->  flank
+                // 如果我们需要压制兵且成员是支援/标准角色 -> suppress
                 
                 if (flankers < 1)
                 {

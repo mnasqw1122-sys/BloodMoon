@@ -55,7 +55,7 @@ namespace BloodMoon.AI
         private float _metricsUpdateInterval = 5.0f;
         private float _lastMetricsUpdate;
         
-        // Concurrent pathfinding tracking for performance optimization
+        // 并发路径查找跟踪用于性能优化
         private int _concurrentPathfindingCount = 0;
         private object _pathfindingLock = new object();
         
@@ -94,7 +94,7 @@ namespace BloodMoon.AI
             var metrics = _systemMetrics["BehaviorSystem"];
             metrics.SetMetric("ConcurrentPathfinding", _concurrentPathfindingCount);
             
-            // Alert if too many concurrent pathfinding operations
+            // 如果并发路径查找操作过多则发出警报
             if (_concurrentPathfindingCount > 10)
             {
                 metrics.AddAlert($"High concurrent pathfinding: {_concurrentPathfindingCount}");
@@ -125,7 +125,7 @@ namespace BloodMoon.AI
                 UpdateAllMetrics();
                 _lastMetricsUpdate = Time.time;
                 
-                // Output critical metrics
+                // 输出关键指标
                 LogCriticalMetrics();
             }
         }
@@ -134,17 +134,17 @@ namespace BloodMoon.AI
         {
             foreach(var m in _systemMetrics.Values) m.ClearAlerts();
             
-            // Update Weapon System Metrics
+            // 更新武器系统指标
             UpdateWeaponSystemMetrics();
             
-            // Other systems updates could go here
+            // 其他系统更新可以放在这里
         }
         
         private void UpdateWeaponSystemMetrics()
         {
             var metrics = _systemMetrics["WeaponSystem"];
             
-            // Count AI weapon status
+            // 统计AI武器状态
             int totalAI = BloodMoonAIController.AllControllers.Count;
             int aiWithWeapons = BloodMoonAIController.AllControllers.Count(a => a.HasWeapon);
             int aiWithoutWeapons = totalAI - aiWithWeapons;
@@ -154,7 +154,7 @@ namespace BloodMoon.AI
             metrics.SetMetric("AIWithoutWeapons", aiWithoutWeapons);
             metrics.SetMetric("WeaponSuccessRate", totalAI > 0 ? (float)aiWithWeapons / totalAI : 0f);
             
-            // Detect issues
+            // 检测问题
             if (totalAI > 0 && aiWithoutWeapons > totalAI * 0.5f)
             {
                 metrics.AddAlert("High percentage of AI without weapons");
@@ -170,7 +170,7 @@ namespace BloodMoon.AI
             
             foreach (var metrics in _systemMetrics.Values)
             {
-                // Only log if interesting or has alerts
+                // 仅在有兴趣或有警报时记录
                 var critical = metrics.GetCriticalMetrics();
                 var alerts = metrics.GetAlerts();
                 
@@ -190,7 +190,7 @@ namespace BloodMoon.AI
                 }
             }
             
-            // Only log to console if there are alerts or periodically (to avoid spam)
+            // 仅在存在警报或定期记录到控制台（避免垃圾信息）
             if (hasAlerts || Time.frameCount % 1000 == 0)
             {
                 if (hasAlerts) BloodMoon.Utils.Logger.Error(log.ToString());

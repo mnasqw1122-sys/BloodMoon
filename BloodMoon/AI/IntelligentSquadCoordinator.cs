@@ -17,7 +17,7 @@ namespace BloodMoon.AI
     public class SquadTactics
     {
         public Squad Squad { get; set; }
-        public string CurrentFormation { get; set; } = "Line";
+        public string CurrentFormation { get; set; } = "Line"; // 线形
         
         public SquadTactics(Squad squad)
         {
@@ -59,7 +59,7 @@ namespace BloodMoon.AI
             
             _lastUpdateTime = Time.time;
             
-            // Clean up invalid squads
+            // 清理无效小队
             var keys = _squadTactics.Keys.ToList();
             foreach(var k in keys)
             {
@@ -82,7 +82,7 @@ namespace BloodMoon.AI
             var squad = tactics.Squad;
             if (squad.Members.Count == 0) return;
             
-            // Calculate Squad Center
+            // 计算小队中心
             Vector3 center = Vector3.zero;
             int activeMembers = 0;
             
@@ -100,15 +100,15 @@ namespace BloodMoon.AI
                 squad.SquadCenter = center / activeMembers;
             }
             
-            // Update Formation Positions (Logic to be implemented if needed, for now just center calc)
-            // UpdateFormationPositions(squad, tactics.CurrentFormation);
+            // 更新阵型位置（如需，将实现相关逻辑，目前仅进行居中计算）
+            // UpdateFormationPositions(队伍, 战术.当前阵型);
         }
         
         private void CoordinateSquadActions(SquadTactics tactics)
         {
             var squad = tactics.Squad;
             
-            // Assess Situation
+            // 评估战术形势
             var tacticalSituation = AssessTacticalSituation(squad);
             
             switch (tacticalSituation)
@@ -137,7 +137,7 @@ namespace BloodMoon.AI
         
         private void HandleSquadCommunication(SquadTactics tactics)
         {
-            // Placeholder for voice lines or signals
+            // 台词或信号的占位符
         }
         
         private TacticalSituation AssessTacticalSituation(Squad squad)
@@ -147,7 +147,7 @@ namespace BloodMoon.AI
             float avgHealth = squad.Members.Average(m => m.GetHealthPercentage());
             int membersWithWeapons = squad.Members.Count(m => m.HasWeapon);
             
-            // Calculate average distance to target
+            // 计算到目标的平均距离
             float totalDist = 0f;
             int count = 0;
             foreach(var m in squad.Members)
@@ -177,7 +177,7 @@ namespace BloodMoon.AI
         
         private void ExecuteAdvancingTactics(Squad squad)
         {
-            // Assault members push, Support covers
+            // 突击队员推进，支援队员掩护
             foreach (var member in squad.Members)
             {
                 if (member.Role == AIRole.Assault || member.Role == AIRole.Standard)
@@ -201,7 +201,7 @@ namespace BloodMoon.AI
         
         private void ExecuteFlankingTactics(Squad squad)
         {
-            // Split squad: 2 flank, rest suppress
+            // 分队：2人侧翼，其余压制
             int flankers = 0;
             foreach (var member in squad.Members)
             {

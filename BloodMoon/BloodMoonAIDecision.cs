@@ -7,37 +7,37 @@ using ItemStatsSystem;
 
 namespace BloodMoon
 {
-    // Context object to pass data between Controller and Actions
+    // 上下文对象，用于在Controller和Actions之间传递数据
     public class AIContext
     {
         public CharacterMainControl? Character;
         public BloodMoonAIController? Controller;
         public AIDataStore? Store;
         public CharacterMainControl? Target;
-        public AIPersonality Personality = new AIPersonality(); // Default
+        public AIPersonality Personality = new AIPersonality(); // 默认
         public AIRole Role = AIRole.Standard;
         
-        // Target Persistence
+        // 目标持久性
         private float _targetSwitchCooldown;
-        private const float MIN_TARGET_SWITCH_TIME = 3.0f; // Minimum time to stick to a target
+        private const float MIN_TARGET_SWITCH_TIME = 3.0f; // 坚持目标的最小时间
         private float _timeWithCurrentTarget;
         
-        // Sensory Data
+        // 感官数据
         public float DistToTarget;
         public Vector3 DirToTarget;
         public bool HasLoS;
         public float LastSeenTime;
         public Vector3 LastKnownPos;
-        public float Pressure; // 0 to 10+
+        public float Pressure; // 0 到 10+
         
-        // State Flags
+        // 状态标志
         public bool IsHurt;
         public bool IsLowAmmo;
         public bool IsReloading;
         public bool IsStuck;
         public bool CanChase;
         
-        // Weapon State
+        // 武器状态
         public Item? PrimaryWeapon;
         public Item? SecondaryWeapon;
         public Item? MeleeWeapon;
@@ -46,15 +46,15 @@ namespace BloodMoon
         public float HealthPercentage;
         public bool IsInCombat => Pressure > 0 || HasLoS;
         
-        // Target State
+        // 目标状态
         public bool TargetIsReloading;
         public bool TargetIsHealing;
 
         public bool IsBoss => Controller != null && Controller.IsBoss;
         public bool IsRaged => Controller != null && Controller.IsRaged;
-        public string SquadOrder = string.Empty; // Order from SquadManager (e.g., "Flank", "Suppress")
+        public string SquadOrder = string.Empty; // 来自SquadManager的命令（例如"Flank", "Suppress"）
 
-        // Static Cache for Target Acquisition (Deprecated in favor of Store.AllCharacters)
+        // 目标获取的静态缓存（已弃用，改用Store.AllCharacters）
         private static List<CharacterMainControl> _cachedCharacters = new List<CharacterMainControl>();
         private static float _lastCacheTime;
 
@@ -74,7 +74,7 @@ namespace BloodMoon
         {
             if (Character == null) return;
 
-            // Update target persistence timers
+            // 更新目标持久性计时器
             if (_targetSwitchCooldown > 0f)
             {
                 _targetSwitchCooldown -= Time.deltaTime;
@@ -89,7 +89,7 @@ namespace BloodMoon
                 _timeWithCurrentTarget = 0f;
             }
 
-            // Use Global Cache from Store
+            // 使用存储的全局缓存
             List<CharacterMainControl> targets;
             if (Store != null)
             {
@@ -101,24 +101,24 @@ namespace BloodMoon
                 targets = _cachedCharacters;
             }
 
-            // 2. Select Best Target
+            // 2. 选择最佳目标
             CharacterMainControl? bestTarget = null;
             float bestScore = -99999f;
             Vector3 myPos = Character.transform.position;
             CharacterMainControl? currentTarget = Target;
 
-            // Scan for other hostile targets
+            // 扫描其他敌对目标
             if (targets != null)
             {
                 var myTeam = Character.Team;
                 int count = targets.Count;
                 
-                // Ensure Player is considered
+                // 确保玩家被考虑
                 if (CharacterMainControl.Main != null && !targets.Contains(CharacterMainControl.Main))
                 {
-                    // If player is not in cache yet (rare), just check him manually
-                    // We can't add to Store list, but we can check him in loop
-                    // Just force check player separately
+                    // 如果玩家尚未在缓存中（罕见），只需手动检查他
+                    // 我们不能添加到存储列表，但可以在循环中检查他
+                    // 只需强制单独检查玩家
                 }
 
                 for(int i=0; i<count; i++)
@@ -127,54 +127,54 @@ namespace BloodMoon
                     if (c == null || c == Character) continue;
                     if (c.Health.CurrentHealth <= 0) continue;
                     
-                    // Hostility Logic: Attack different teams
+                    // 敌对逻辑：攻击不同队伍
                     if (c.Team != myTeam) 
                     {
-                        // Additional check: Ensure target is not a BloodMoon AI (same mod)
-                        // This prevents friendly fire between our mod's enemies
+                        // 额外检查：确保目标不是BloodMoon AI（同一模组）
+                        // 这防止了我们模组敌人之间的友军火力
                         bool isBloodMoonAI = c.GetComponent<BloodMoonAIController>() != null;
                         if (isBloodMoonAI) continue;
                         
                         float dist = Vector3.Distance(c.transform.position, myPos);
-                        float score = 1000f - dist; // Base Score: Closer is better
+                        float score = 1000f - dist; // 基础分数：越近越好
 
-                        // --- Priority Rules ---
+                        // --- 优先级规则 ---
                         
-                        // 1. Player Priority (Huge Bonus)
-                        // If player is alive, we almost ALWAYS want to target them unless they are very far away
+                        // 1. 玩家优先级（巨大加成）
+                        // 如果玩家活着，我们几乎总是想攻击他们，除非他们非常远
                         if (c == CharacterMainControl.Main)
                         {
-                            score += 500f; // Equivalent to being 500m closer
+                            score += 500f; // 相当于距离近了500米
                         }
 
-                        // 2. Target Stickiness (Enhanced Hysteresis)
-                        // Prevent rapid switching between targets of similar value
+                        // 2. 目标粘性（增强的滞后）
+                        // 防止在相似价值的目标之间快速切换
                         if (c == currentTarget)
                         {
-                            // Base stickiness bonus
-                            float stickinessBonus = 25f; // Increased from 15f
+                            // 基础粘性加成
+                            float stickinessBonus = 25f; // 从15f增加
                             
-                            // Additional bonus based on time spent with target
-                            stickinessBonus += Mathf.Min(30f, _timeWithCurrentTarget * 2f); // Up to 30f bonus for 15s with target
+                            // 基于与目标相处时间的额外加成
+                            stickinessBonus += Mathf.Min(30f, _timeWithCurrentTarget * 2f); // 与目标相处15秒最多30f加成
                             
                             score += stickinessBonus;
                         }
-                        // Penalty for switching targets too soon
+                        // 切换目标太快的惩罚
                         else if (currentTarget != null && _targetSwitchCooldown > 0f)
                         {
-                            // Reduce score by a significant amount if we're still in cooldown
+                            // 如果我们仍在冷却中，显著降低分数
                             score -= 100f;
                         }
                         
-                        // 3. Distance Cap for "Ignoring" Player
-                        // If player is extremely far (>150m) and there is a native enemy right here (<10m), 
-                        // the native enemy might score higher:
-                        // Player Score: 1000 - 150 + 500 = 1350
-                        // Native Score: 1000 - 10 = 990
-                        // Result: Still Player. 
-                        // Let's adjust. If we really want to kill native enemies when player is absent or super far, 
-                        // the player bonus handles most cases.
-                        // But if player is present, we WANT to ignore native enemies mostly.
+                        // 3. "忽略"玩家的距离上限
+                        // 如果玩家非常远（>150米）而这里有一个原生敌人（<10米），
+                        // 原生敌人的分数可能更高：
+                        // 玩家分数：1000 - 150 + 500 = 1350
+                        // 原生分数：1000 - 10 = 990
+                        // 结果：仍然是玩家。
+                        // 让我们调整一下。如果我们真的想在玩家不在或非常远时杀死原生敌人，
+                        // 玩家加成处理了大多数情况。
+                        // 但如果玩家在场，我们想要忽略原生敌人。
                         
                         if (score > bestScore)
                         {
@@ -185,18 +185,18 @@ namespace BloodMoon
                 }
             }
 
-            // Fallback: If no target found, but player is alive, target player
+            // 回退：如果未找到目标，但玩家活着，则目标为玩家
             if (bestTarget == null && CharacterMainControl.Main != null && CharacterMainControl.Main.Health.CurrentHealth > 0)
             {
-                 // Only if player is not ally
+                 // 仅当玩家不是盟友时
                  if (CharacterMainControl.Main.Team != Character.Team)
                     bestTarget = CharacterMainControl.Main;
             }
 
-            // Check if target is changing
+            // 检查目标是否正在改变
             if (bestTarget != currentTarget)
             {
-                // Set cooldown only if we're switching from a valid target
+                // 仅当从有效目标切换时才设置冷却
                 if (currentTarget != null)
                 {
                     _targetSwitchCooldown = MIN_TARGET_SWITCH_TIME;
@@ -212,7 +212,7 @@ namespace BloodMoon
             DistToTarget = diff.magnitude;
             DirToTarget = diff.normalized;
             
-            // Basic LoS Check (Controller should implement the detailed one)
+            // 基本视线检查（Controller应实现详细检查）
             if (Controller != null)
             {
                 HasLoS = Controller.CheckLineOfSight(Target);
@@ -228,14 +228,14 @@ namespace BloodMoon
                 LastKnownPos = Target.transform.position;
             }
             
-            // Update Pressure
+            // 更新压力
             Pressure = Mathf.Max(0f, Pressure - Time.deltaTime * 0.5f);
             
-            // Check Health
+            // 检查生命值
             HealthPercentage = Character.Health.CurrentHealth / Character.Health.MaxHealth;
             IsHurt = HealthPercentage < 0.4f;
             
-            // Check Ammo & Weapons
+            // 检查弹药和武器
             var gun = Character.GetGun();
             AmmoCount = gun != null ? gun.BulletCount : 0;
             IsLowAmmo = gun != null && gun.BulletCount < (gun.Capacity * 0.2f);
@@ -245,7 +245,7 @@ namespace BloodMoon
             SecondaryWeapon = Character.SecWeaponSlot()?.Content;
             MeleeWeapon = Character.MeleeWeaponSlot()?.Content;
             
-            // Check for throwable/skill item
+            // 检查可投掷/技能物品
             ThrowableWeapon = null;
             var inv = Character.CharacterItem?.Inventory;
             if (inv != null)
@@ -262,12 +262,12 @@ namespace BloodMoon
                 }
             }
             
-            // Check Target State
+            // 检查目标状态
             var tGun = Target.GetGun();
             TargetIsReloading = tGun != null && tGun.IsReloading();
-            TargetIsHealing = Target.CurrentHoldItemAgent != null && Target.CurrentHoldItemAgent.Item.GetComponent<Drug>() != null; // Simplified check
+            TargetIsHealing = Target.CurrentHoldItemAgent != null && Target.CurrentHoldItemAgent.Item.GetComponent<Drug>() != null; // 简化检查
 
-            // Check State
+            // 检查状态
             if (Controller != null)
             {
                 CanChase = Controller.CanChase;
@@ -282,7 +282,7 @@ namespace BloodMoon
         protected float _score;
         protected float _cooldown;
         
-        // Behavior persistence
+        // 行为持续性
         protected float _timeInAction;
         protected float _minActionDuration;
         protected float _maxActionDuration;
@@ -294,7 +294,7 @@ namespace BloodMoon
         { 
             _timeInAction = 0f;
             _shouldExit = false;
-            // Set default min/max durations based on action type
+            // 根据动作类型设置默认最小/最大持续时间
             _minActionDuration = 1.0f;
             _maxActionDuration = 10.0f;
         }
@@ -304,19 +304,19 @@ namespace BloodMoon
             _shouldExit = false;
         }
         
-        // Update action time and check if we should continue
+        // 更新动作时间并检查是否应该继续
         public void UpdateActionTime(float dt)
         {
             _timeInAction += dt;
         }
         
-        // Check if action can be interrupted
+        // 检查动作是否可以被中断
         public bool CanBeInterrupted()
         {
             return _timeInAction > _minActionDuration;
         }
         
-        // Check if action should automatically exit
+        // 检查动作是否应该自动退出
         public bool ShouldExit()
         {
             return _shouldExit || _timeInAction > _maxActionDuration;
@@ -333,7 +333,7 @@ namespace BloodMoon
         }
     }
 
-    // --- Concrete Actions ---
+    // --- 具体动作实现 ---
 
     public class Action_BossCommand : AIAction
     {
@@ -342,8 +342,8 @@ namespace BloodMoon
         {
             if (!ctx.IsBoss || IsCoolingDown()) return 0f;
             
-            // Trigger if we have allies nearby (Controller handles check)
-            // Or just periodically if in combat
+            // 若附近有盟友则触发（由Controller处理检查）
+            // 或在战斗中定期触发
             if (ctx.HasLoS || ctx.Pressure > 1f)
             {
                 return 0.65f;
@@ -358,7 +358,7 @@ namespace BloodMoon
             }
             else
             {
-                _cooldown = 5f; // Retry sooner if failed (no allies)
+                _cooldown = 5f; // 若失败则更快重试（无盟友）
             }
         }
     }
@@ -370,39 +370,39 @@ namespace BloodMoon
         {
             if (ctx.Character == null || ctx.Controller == null) return 0f;
             
-            // If already committed to healing, but being attacked, lower priority
+            // 若已开始治疗但正在被攻击，则降低优先级
             if (ctx.Controller.IsHealing)
             {
-                // If being attacked (high pressure or low health), allow interruption
+                // 若正在被攻击（高压力或低生命值），允许中断
                 if (ctx.Pressure > 3.0f || ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth < 0.3f)
                 {
-                    return 0.5f; // Lower priority to allow attack actions
+                    return 0.5f; // 降低优先级以允许攻击动作
                 }
-                return 0.8f; // Lowered from 0.98f to allow interruption
+                return 0.8f; // 从0.98f降低以允许中断
             }
 
-            // Optimization: Early exit if no meds
+            // 优化：若无治疗物品则提前退出
             if (!ctx.Controller.HasHealingItem()) return 0f;
 
             float healthPct = ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth;
             
-            // Linear increase as health drops
-            float urgency = (1.0f - healthPct); // e.g., 0.4 at 60% HP
+            // 随着生命值下降线性增加
+            float urgency = (1.0f - healthPct); // 例如，60%生命值时为0.4
             
-            // 1. Critical Health Boost: Force heal if dying
+            // 1. 危急生命值提升：若濒死则强制治疗
             if (healthPct < 0.5f) urgency += 0.2f;
             if (healthPct < 0.25f) urgency += 0.4f;
 
-            // 2. Safety Bonus: If hidden, take opportunity to heal
+            // 2. 安全奖励：若隐藏，则抓住机会治疗
             if (!ctx.HasLoS) urgency += 0.2f;
             
-            // 3. Pressure Penalty: Increased penalty when being attacked
-            // Bosses are less affected by pressure
+            // 3. 压力惩罚：被攻击时增加惩罚
+            // Boss受压力影响较小
             float pressurePenalty = ctx.Controller.IsBoss ? 0.1f : 0.3f;
             if (ctx.Pressure > 1.0f) urgency -= pressurePenalty;
-            if (ctx.Pressure > 3.0f) urgency -= pressurePenalty * 2f; // Double penalty when under heavy fire
+            if (ctx.Pressure > 3.0f) urgency -= pressurePenalty * 2f; // 遭受猛烈火力时惩罚加倍
             
-            // 4. Personality Variation
+            // 4. 人格差异
             float personalityBonus = ctx.Personality.Caution * 0.2f; 
             urgency += personalityBonus;
             
@@ -421,39 +421,39 @@ namespace BloodMoon
         {
             if (ctx.Target == null || ctx.Character == null) return 0f;
             
-            // Don't rush if low health (unless raged boss)
+            // 若生命值低则不冲锋（除非是狂暴的Boss）
             float hp = ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth;
             if (hp < 0.4f && !ctx.IsRaged) return 0f;
 
-            // Only rush if target is vulnerable
+            // 仅当目标脆弱时才冲锋
             if (ctx.TargetIsReloading || ctx.TargetIsHealing)
             {
-                // And we are relatively close
+                // 且我们相对较近
                 if (ctx.DistToTarget < 20f && ctx.HasLoS)
                 {
-                    // Bosses love to punish
+                    // Boss喜欢惩罚敌人
                     if (ctx.IsBoss) 
                     {
-                         if (ctx.IsRaged) return 0.98f; // Raged boss almost always rushes vulnerable target
+                         if (ctx.IsRaged) return 0.98f; // 狂暴的Boss几乎总是冲向脆弱的目标
                          return 0.9f;
                     }
                     return 0.75f;
                 }
             }
             
-            // Rage Mode Rush (even if target not vulnerable)
+            // 狂暴模式冲锋（即使目标不脆弱）
             if (ctx.IsRaged && ctx.HasLoS && ctx.DistToTarget < 15f)
             {
                 return 0.85f;
             }
 
-            // Personality: Aggressive agents like to rush
+            // 人格：攻击性强的AI喜欢冲锋
             if (ctx.Personality.Aggression > 0.8f && ctx.HasLoS && ctx.DistToTarget < 25f)
             {
                 return 0.5f * ctx.Personality.Aggression;
             }
 
-            // Role Bonus: Assault
+            // 角色奖励：突击
             if (ctx.Role == AIRole.Assault && ctx.HasLoS && ctx.DistToTarget < 20f)
             {
                 return 0.6f;
@@ -472,22 +472,22 @@ namespace BloodMoon
         public Action_Reload() { Name = "Reload"; }
         public override float Evaluate(AIContext ctx)
         {
-            if (ctx.IsReloading) return 0.9f; // Keep reloading if started
+            if (ctx.IsReloading) return 0.9f; // 若已开始则继续装填
             if (ctx.Character == null) return 0f;
             var gun = ctx.Character.GetGun();
             if (gun == null) return 0f;
             
-            if (gun.BulletCount == 0) return 0.92f; // Empty -> Must reload
+            if (gun.BulletCount == 0) return 0.92f; // 空弹夹 -> 必须装填
             
-            // Tactical reload
+            // 战术装填
             if (ctx.IsLowAmmo && !ctx.HasLoS) return 0.7f;
             
             return 0f;
         }
         public override void Execute(AIContext ctx)
         {
-            // If we have cover and are reloading, move to cover?
-            // Handled by PerformReload which might trigger cover logic
+            // 若有掩护且正在装填，是否移动到掩护处？
+            // 由PerformReload处理，可能触发掩护逻辑
             ctx.Controller?.PerformReload();
         }
     }
@@ -500,16 +500,16 @@ namespace BloodMoon
             if (IsCoolingDown()) return 0f;
             if (ctx.Character == null || ctx.Target == null || ctx.Controller == null) return 0f;
             
-            // Only throw if target is in cover or we haven't seen them move much
-            // For now, simple check: distance 8-25m, and we have a grenade
+            // 仅当目标在掩护中或我们没看到他们移动时才投掷
+            // 目前，简单检查：距离8-25米，且我们有手榴弹
             if (ctx.DistToTarget < 8f || ctx.DistToTarget > 25f) return 0f;
             
             if (!ctx.Controller.HasGrenade()) return 0f;
             
-            // If target has been stationary (camping) or we have lost LoS recently but know position
+            // 若目标静止不动（蹲点）或我们最近失去了视线但知道位置
             bool isCamping = Vector3.Distance(ctx.Target.transform.position, ctx.LastKnownPos) < 2.0f && (Time.time - ctx.LastSeenTime < 5f);
             
-            // If high pressure or target is hiding, boost score
+            // 若压力大或目标在隐藏，提高分数
             if ((!ctx.HasLoS || isCamping) && ctx.Pressure > 1f) return 0.82f;
             
             return 0.4f;
@@ -536,14 +536,14 @@ namespace BloodMoon
             if (ctx.Character == null) return 0f;
             float hp = ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth;
             
-            // Bosses don't retreat easily
+            // Boss不会轻易撤退
             if (ctx.Controller != null && ctx.Controller.IsBoss)
             {
-                if (hp < 0.15f) return 0.5f; // Only when critical
+                if (hp < 0.15f) return 0.5f; // 仅当危急时
                 return 0f;
             }
 
-            // If dying and under pressure
+            // 若濒死且承受压力
             if (hp < 0.3f && ctx.Pressure > 2.0f) return 0.95f;
             
             return 0f;
@@ -561,13 +561,13 @@ namespace BloodMoon
         {
             if (IsCoolingDown()) return 0f;
             
-            // High pressure -> Cover
+            // 高压力 -> 掩护
             if (ctx.Pressure > 2.0f) return 0.85f;
             
-            // Reloading or Healing in open -> Cover
+            // 在开阔地带装填或治疗 -> 掩护
             if ((ctx.IsReloading || ctx.IsHurt) && ctx.HasLoS) return 0.88f;
             
-            // Just general caution
+            // 一般性谨慎
             if (ctx.HasLoS && ctx.DistToTarget < 10f) return 0.6f;
             
             return 0f;
@@ -577,12 +577,12 @@ namespace BloodMoon
             if (ctx.Controller == null) return;
             if (ctx.Controller.MoveToCover())
             {
-                // If successful, set cooldown so we don't spam cover search
+                // 若成功，设置冷却时间以避免频繁搜索掩护
                 _cooldown = 2.0f;
             }
             else
             {
-                // Failed to find cover? Panic/Drop score
+                // 未能找到掩护？恐慌/降低分数
                 _cooldown = 1.0f; 
             }
         }
@@ -595,32 +595,32 @@ namespace BloodMoon
         {
             if (ctx.Character == null || ctx.Target == null) return 0f;
             
-            // Cannot suppress without ammo
+            // 没有弹药无法压制
             if (ctx.IsLowAmmo || ctx.IsReloading) return 0f;
 
-            // 1. SQUAD TACTIC: Support Flankers
-            // If allies are flanking (we can infer or check store), we should suppress
+            // 1. 小队战术：支援侧翼
+            // 若盟友正在侧翼（我们可以推断或检查存储），我们应该压制
             if (ctx.Store != null)
             {
-                // Check if anyone else is engaging?
+                // 检查是否有其他人正在交战？
                 int engaging = ctx.Store.GetEngagementCount(ctx.Target);
-                // If we are part of a group (2+), one should suppress
-                // Use Personality: High Teamwork agents prefer suppression
+                // 若我们是团队的一部分（2+人），应有一人压制
+                // 使用人格：高团队合作的AI偏好压制
                 if (engaging > 0 && ctx.DistToTarget > 20f && ctx.HasLoS)
                 {
-                    float score = 0.6f + ctx.Personality.Teamwork * 0.3f; // Up to 0.9 for high teamwork
+                    float score = 0.6f + ctx.Personality.Teamwork * 0.3f; // 高团队合作可达0.9
                     
-                    // Role Bonus: Support
+                    // 角色奖励：支援
                     if (ctx.Role == AIRole.Support) score += 0.2f;
                     
                     return score;
                 }
             }
 
-            // 2. Blind Fire: If no LoS but recent contact
+            // 2. 盲目射击：若无视线但最近有接触
             if (!ctx.HasLoS && ctx.LastSeenTime > 0f && (Time.time - ctx.LastSeenTime < 4f))
             {
-                // Only if we have plenty of ammo
+                // 仅当有充足弹药时
                 var gun = ctx.Character.GetGun();
                 if (gun != null && gun.BulletCount > gun.Capacity * 0.5f)
                 {
@@ -650,34 +650,34 @@ namespace BloodMoon
 
             if (ctx.HasLoS && ctx.DistToTarget < engageDist)
             {
-                // Smooth engagement score based on distance
+                // 基于距离的平滑交战分数
                 float distFactor = Mathf.Clamp01((engageDist - ctx.DistToTarget) / engageDist);
                 
-                // Base score with smooth distance-based weighting
-                float score = 0.3f + (distFactor * 0.4f); // Range: 0.3 to 0.7
+                // 基于距离加权的基础分数
+                float score = 0.3f + (distFactor * 0.4f); // 范围：0.3 到 0.7
                 
-                // Bonus if we are safe (low pressure) - smooth transition
+                // 若安全（低压力）则加分 - 平滑过渡
                 float pressureFactor = Mathf.Clamp01((3.0f - ctx.Pressure) / 3.0f);
                 score += pressureFactor * 0.2f;
                 
-                // Bonus if target is close - smooth transition
+                // 若目标接近则加分 - 平滑过渡
                 float closeRangeBonus = Mathf.Clamp01((15f - ctx.DistToTarget) / 15f);
                 score += closeRangeBonus * 0.1f;
                 
-                // Bosses are more aggressive - consistent bonus
+                // Boss更具攻击性 - 持续加分
                 if (ctx.Controller != null && ctx.Controller.IsBoss) score += 0.15f;
                 
                 // Health Logic Update:
                 float hp = ctx.Character != null ? ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth : 1f;
                 
-                // If critical health AND enemy is close -> Desperate Fight (Cornered Beast)
+                // 若生命值危急且敌人接近 -> 殊死搏斗（困兽犹斗）
                 if (hp < 0.3f && ctx.DistToTarget < 10f)
                 {
-                    // Smooth desperate fight bonus based on health and distance
+                    // 基于生命值和距离的平滑殊死搏斗加分
                     float desperateFactor = Mathf.Clamp01((0.3f - hp) / 0.3f) * Mathf.Clamp01((10f - ctx.DistToTarget) / 10f);
-                    score += desperateFactor * 0.4f; // Fight for your life!
+                    score += desperateFactor * 0.4f; // 为生存而战！
                 }
-                // Only penalize engagement if we are hurt but have distance (so we might retreat/heal)
+                // 仅当受伤但距离较远时才惩罚交战（因此可能撤退/治疗）
                 else if (hp < 0.4f && ctx.DistToTarget > 15f) 
                 {
                     float retreatFactor = Mathf.Clamp01((0.4f - hp) / 0.4f) * Mathf.Clamp01((ctx.DistToTarget - 15f) / 15f);
@@ -710,12 +710,12 @@ namespace BloodMoon
 
             if (ctx.HasLoS)
             {
-                 // If too far, chase
+                 // 若太远则追逐
                  if (ctx.DistToTarget > 20f) return 0.6f;
-                 return 0.1f; // Prefer Engage if LoS
+                 return 0.1f; // 若有视线则优先Engage
             }
             
-            // No LoS, but we have a last known position
+            // 无视线，但我们有最后已知位置
             if (ctx.LastSeenTime > 0f && Time.time - ctx.LastSeenTime < 20f)
             {
                 return 0.55f;
@@ -734,10 +734,10 @@ namespace BloodMoon
         public Action_Patrol() { Name = "Patrol"; }
         public override float Evaluate(AIContext ctx)
         {
-            // If we have nothing better to do (no target, not stuck)
+            // 若我们没有更好的事情要做（无目标，未卡住）
             if (ctx.Target == null && !ctx.IsStuck)
             {
-                // Patrol is the default state
+                // Patrol是默认状态
                 return 0.2f;
             }
             return 0f;
@@ -753,19 +753,19 @@ namespace BloodMoon
         public Action_Search() { Name = "Search"; }
         public override float Evaluate(AIContext ctx)
         {
-            // Boost if global intel says player is elsewhere
+            // 若全局情报显示玩家在其他地方则提升优先级
              if (ctx.Store != null && ctx.Store.LastKnownPlayerPos != Vector3.zero && ctx.Character != null)
              {
                   float d = Vector3.Distance(ctx.Store.LastKnownPlayerPos, ctx.Character.transform.position);
                   if (d < 40f && !ctx.HasLoS) return 0.45f;
              }
 
-            // If we lost the target for a while
+            // 若我们失去目标一段时间
             if (!ctx.HasLoS && (Time.time - ctx.LastSeenTime > 5f))
             {
                 return 0.4f;
             }
-            return 0.05f; // Low priority default
+            return 0.05f; // 低优先级默认值
         }
         public override void Execute(AIContext ctx)
         {
@@ -781,12 +781,12 @@ namespace BloodMoon
             if (ctx.Character == null) return 0f;
             float hp = ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth;
             
-            // Panic if low HP and high pressure
+            // 若生命值低且压力大则恐慌
             if (hp < 0.25f && ctx.Pressure > 3.0f)
             {
-                 // Bosses don't panic easily
+                 // Boss不会轻易恐慌
                  if (ctx.IsBoss) return 0f;
-                 return 1.0f; // Override everything
+                 return 1.0f; // 覆盖所有其他动作
             }
             return 0f;
         }
@@ -803,35 +803,35 @@ namespace BloodMoon
         {
             if (ctx.Character == null || ctx.Target == null) return 0f;
 
-            // Squad Order Override
+            // 小队命令覆盖
             if (ctx.SquadOrder == "Flank") return 0.95f;
 
-            // 1. Basic Flanking Condition: Good health, some distance
+            // 1. 基本侧翼条件：良好的生命值，适当的距离
             float hp = ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth;
-            if (hp < 0.4f) return 0f; // Don't flank if injured
+            if (hp < 0.4f) return 0f; // 受伤时不侧翼
 
-            // 2. SQUAD TACTIC: If target is suppressed or engaging someone else
+            // 2. 小队战术：若目标被压制或正在与他人交战
             if (ctx.Store != null)
             {
                 int engaging = ctx.Store.GetEngagementCount(ctx.Target);
-                // If 2+ allies are engaging, or 1 ally is suppressing, we should flank
+                // 若2+盟友正在交战，或1个盟友正在压制，我们应该侧翼
                 if (engaging >= 2) return 0.75f;
                 
-                // Role Bonus: Assault loves to flank if someone else is engaging
+                // 角色奖励：突击兵喜欢在有人交战时侧翼
                 if (ctx.Role == AIRole.Assault && engaging >= 1) return 0.8f;
             }
             
-            // 3. Situational: If we have LoS but are at suboptimal range/angle
-            // Check if we are "in front" of target (dangerous)
+            // 3. 情况：若我们有视线但处于次优范围/角度
+            // 检查我们是否在目标的"前方"（危险）
             Vector3 toMe = (ctx.Character.transform.position - ctx.Target.transform.position).normalized;
             float angle = Vector3.Angle(ctx.Target.transform.forward, toMe);
             if (angle < 45f && ctx.HasLoS && ctx.Pressure < 2f)
             {
-                // We are in their face, try to flank to side
+                // 我们在他们面前，尝试从侧面侧翼
                 return 0.6f;
             }
 
-            // 4. If no LoS but we know position, flank instead of direct chase
+            // 4. 若无视线但我们知道位置，侧翼而非直接追逐
             if (!ctx.HasLoS && ctx.LastSeenTime > 0f && Time.time - ctx.LastSeenTime < 10f)
             {
                 return 0.5f;
@@ -842,7 +842,7 @@ namespace BloodMoon
         public override void Execute(AIContext ctx)
         {
             if (ctx.Character == null) return;
-            // Use tactical flank logic in controller
+            // 使用控制器中的战术侧翼逻辑
             ctx.Controller?.PerformTacticalFlank();
         }
     }
@@ -852,8 +852,8 @@ namespace BloodMoon
         public Action_Unstuck() { Name = "Unstuck"; }
         public override float Evaluate(AIContext ctx)
         {
-            // If controller reports stuck
-            if (ctx.IsStuck) return 1.0f; // Max priority
+            // 若控制器报告卡住
+            if (ctx.IsStuck) return 1.0f; // 最高优先级
             return 0f;
         }
         public override void Execute(AIContext ctx)

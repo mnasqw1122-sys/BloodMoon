@@ -7,11 +7,11 @@ namespace BloodMoon.Utils
     [Serializable]
     public class ModConfig
     {
-        // Public fields for JsonUtility serialization
+        // JsonUtility序列化的公共字段
         public float SleepHours = 160f;
         public float ActiveHours = 48f;
         
-        // Boss Settings
+        // Boss设置
         public int BossCount = 5;
         public int BossMinionCount = 5;
         public float BossHealthMultiplier = 5.0f;
@@ -22,10 +22,10 @@ namespace BloodMoon.Utils
         public float MinionBodyArmor = 6f;
         public bool EnableBossGlow = true;
         
-        // General Settings
+        // 通用设置
         public string Language = "zh-CN";
 
-        // Static singleton
+        // 静态单例
         private static ModConfig _instance = null!;
         public static ModConfig Instance
         {
@@ -60,7 +60,7 @@ namespace BloodMoon.Utils
                 catch (Exception ex)
                 {
                     Logger.Error($"Failed to load config: {ex.Message}");
-                    _instance = new ModConfig(); // Fallback to default
+                    _instance = new ModConfig(); // 回退到默认值
                 }
             }
             else

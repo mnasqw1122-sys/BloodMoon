@@ -16,7 +16,7 @@ namespace BloodMoon.Utils
             _logPath = Path.Combine(modDirectory, "BloodMoon.log");
             _initialized = true;
             
-            // Reset log file on start
+            // 启动时重置日志文件
             try
             {
                 File.WriteAllText(_logPath, $"[BloodMoon] Log Started at {DateTime.Now}\n");
@@ -65,7 +65,7 @@ namespace BloodMoon.Utils
             }
             catch
             {
-                // Ignore file write errors to avoid infinite loops
+                // 忽略文件写入错误以避免无限循环
             }
         }
     }

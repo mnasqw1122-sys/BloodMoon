@@ -30,7 +30,7 @@ namespace BloodMoon
         private bool _selectionInitialized;
         private readonly Dictionary<CharacterMainControl, Vector3> _groupAnchors = new Dictionary<CharacterMainControl, Vector3>();
         private float _bloodMoonStartTime = -1f;
-        private float _bloodMoonDurationSec => ModConfig.Instance.ActiveHours * 3600f; // Config is in hours? No, likely game hours. 
+        private float _bloodMoonDurationSec => ModConfig.Instance.ActiveHours * 3600f; // 配置是以小时为单位？不，可能是游戏小时。 
 
         
         private bool _bloodMoonActive;
@@ -50,7 +50,7 @@ namespace BloodMoon
                 if (ai.enabled) ai.enabled = false;
             }
             
-            // Extra safety: Try to disable NodeCanvas Owner via reflection
+            // 额外安全措施：尝试通过反射禁用NodeCanvas Owner
             var owner = c.GetComponent("GraphOwner") as MonoBehaviour;
             if (owner != null && owner.enabled)
             {
@@ -63,7 +63,7 @@ namespace BloodMoon
                 owner.enabled = false;
             }
 
-            // Also disable FlowScriptController if present
+            // 如果存在也禁用FlowScriptController
             var flow = c.GetComponent("FlowScriptController") as MonoBehaviour;
             if (flow != null && flow.enabled)
             {
@@ -129,11 +129,11 @@ namespace BloodMoon
                     return;
                 }
 
-                // Periodic Weight Enforcement
+                // 定期重量强制执行
                 _weightCheckTimer -= Time.deltaTime;
                 if (_weightCheckTimer <= 0f)
                 {
-                    _weightCheckTimer = 10.0f; // Force fix every 10 seconds to persist against system resets
+                    _weightCheckTimer = 10.0f; // 每10秒强制修复以抵抗系统重置
                     foreach(var c in _processed)
                     {
                         if (c != null && c.gameObject.activeInHierarchy && c.Health.CurrentHealth > 0)
@@ -143,8 +143,8 @@ namespace BloodMoon
                     }
                 }
 
-                // Initialize start time if active and not set, or reset if expired and new raid?
-                // For now, let's rely on StartSceneSetupParallel to set the start time for the raid.
+                // 如果活动且未设置则初始化开始时间，或者如果过期且是新突袭则重置？
+                // 目前，我们依赖StartSceneSetupParallel来设置突袭的开始时间。
                 
                 _scanCooldown -= Time.deltaTime;
                 if (_scanCooldown > 0f)
@@ -154,16 +154,16 @@ namespace BloodMoon
                 var player = CharacterMainControl.Main;
                 if (!_sceneSetupDone || _setupRunning)
                 {
-                    // Wait for setup to complete
+                    // 等待设置完成
                     return;
                 }
                 
-                // Centralized cleanup (every few seconds)
-                if (_scanCooldown > 0.9f) // Do this once per scan cycle
+                // 集中清理（每几秒一次）
+                if (_scanCooldown > 0.9f) // 每个扫描周期执行一次
                 {
                      _store.DecayAndPrune(Time.time, 120f);
                      
-                     // Backup: If cache empty, try to find points
+                     // 备份：如果缓存为空，尝试查找点
                      if (_pointsCache.Count == 0)
                      {
                         var spawners = UnityEngine.Object.FindObjectsOfType<RandomCharacterSpawner>();
@@ -171,7 +171,7 @@ namespace BloodMoon
                      }
                 }
 
-                // Use Centralized Store Cache
+                // 使用集中存储缓存
                 var all = _store.AllCharacters;
                 int count = all.Count;
                 
@@ -180,7 +180,7 @@ namespace BloodMoon
                     var c = all[i];
                     if (c == null || c.IsMainCharacter) continue;
                     
-                    // Optimization: Check if already processed before doing heavy checks
+                    // 优化：在执行重量级检查之前检查是否已处理
                     if (_processed.Contains(c)) continue;
 
                     var preset = c.characterPreset;
@@ -193,7 +193,7 @@ namespace BloodMoon
                     }
                     
                     EnhanceBoss(c);
-                    // SetupBossLocation(c); // Removed
+                    // SetupBossLocation(c); // 已移除
                     EnableRevenge(c, player);
                     SpawnMinionsForBoss(c, c.transform.position, c.gameObject.scene.buildIndex).Forget();
                     _processed.Add(c);
@@ -234,17 +234,17 @@ namespace BloodMoon
             { 
                  var preset = minionPresets[UnityEngine.Random.Range(0, minionPresets.Count)];
                  
-                // Always spawn minions near the boss to ensure they stay together
+                // 始终在Boss附近生成随从以确保它们在一起
                  Vector3 spawnPos = anchor;
                  
-                // Use boss's current position as the anchor, not the initial spawn point
+                // 使用Boss当前位置作为锚点，而不是初始生成点
                  Vector3 bossPos = boss.transform.position;
                  
-                // Generate random offset near the boss (3-8 meters)
+                // 在Boss附近生成随机偏移（3-8米）
                  var offset = UnityEngine.Random.insideUnitCircle * UnityEngine.Random.Range(3f, 8f);
                  spawnPos = bossPos + new Vector3(offset.x, 0, offset.y);
                  
-                 // Basic ground check for safety
+                 // 基本地面检查以确保安全
                  if (UnityEngine.AI.NavMesh.SamplePosition(spawnPos, out var hit, 10f, UnityEngine.AI.NavMesh.AllAreas))
                  {
                      spawnPos = hit.position;
@@ -259,7 +259,7 @@ namespace BloodMoon
                      var clone = await preset.CreateCharacterAsync(spawnPos, Vector3.forward, scene, null, false);
                      if (clone != null)
                      {
-                         // Wait for initialization (Animator, MagicBlend, etc.)
+                         // 等待初始化（Animator、MagicBlend等）
                          await UniTask.Yield(PlayerLoopTiming.Update);
                          await UniTask.Delay(500); 
                          
@@ -282,12 +282,12 @@ namespace BloodMoon
                          if (mh != null) mh.BaseValue *= ModConfig.Instance.MinionHealthMultiplier;
                          clone.Health.SetHealth(clone.Health.MaxHealth);
                          
-                         // Fix Weight Issues for Minion
+                         // 修复随从的重量问题
                          FixWeight(clone, charItem);
 
                          clone.SetTeam(Teams.wolf);
                         
-                        // Ensure minion has weapons
+                        // 确保随从有武器
                         await EnsureMinionHasWeapons(clone);
                         
                         var custom = clone.gameObject.AddComponent<BloodMoonAIController>();
@@ -347,7 +347,7 @@ namespace BloodMoon
 
         private void DisableDefaultSpawner()
         {
-            // Disable default spawner system to prevent new waves
+            // 禁用默认生成器系统以防止新波次生成
             var spawners = UnityEngine.Object.FindObjectsOfType<CharacterSpawnerRoot>();
             if (spawners != null)
             {
@@ -366,28 +366,28 @@ namespace BloodMoon
         {
             if (c == null || item == null) return;
 
-            // 1. Set massive MaxWeight
+            // 1. 设置负重
             var mw = item.GetStat("MaxWeight".GetHashCode());
             if (mw != null) mw.BaseValue = 10000f; // 10000kg
 
-            // 2. Set massive Inventory Capacity to prevent looting block
+            // 2. 设置大量库存容量
             var cap = item.GetStat("InventoryCapacity".GetHashCode());
             if (cap != null) cap.BaseValue = 200f; // 200 slots
 
-            // 3. Remove existing Overweight Buffs
+            // 3. 移除现有的超重增益效果
             c.RemoveBuffsByTag(Duckov.Buffs.Buff.BuffExclusiveTags.Weight, removeOneLayer: false);
             
-            // 4. Force Update Weight State
+            // 4. 强制更新权重状态
             c.UpdateWeightState();
 
-            // 5. Apply Walk/Run Speed Multipliers again just in case weight system overrides them
-            //    Usually weight reduces speed by percentage, so boosting base speed helps
-            //    But if MaxWeight is 10000, current weight should be 0% load, so no penalty.
+            // 5. 再次应用行走/奔跑速度倍率，以防重量系统覆盖它们
+            // 通常重量会按百分比降低速度，因此提升基础速度是有帮助的
+            // 但如果最大重量为10000，当前重量应为0%负载，因此不会产生惩罚。
         }
 
         private void EnhanceBoss(CharacterMainControl c)
         {
-            // IMMEDIATELY disable vanilla AI to prevent logic conflict during async setup
+            // 立即禁用原生AI，以防止在异步设置期间发生逻辑冲突
             DisableVanillaAI(c);
             
             try
@@ -402,12 +402,12 @@ namespace BloodMoon
                 Multiply(item, "TurnSpeed", 1.35f);
                 BoostDefense(item, true);
                 
-                // Fix Weight Issues
+                // 解决体重问题
                 FixWeight(c, item);
                 
                 c.Health.SetHealth(c.Health.MaxHealth);
                 
-                // Ensure AI is attached to the boss if not present
+                // 确保AI与主管关联，若主管未在场则进行关联
                 var custom = c.GetComponent<BloodMoonAIController>();
                 if (custom == null)
                 {
@@ -432,8 +432,8 @@ namespace BloodMoon
 
             try
             {
-                // Search for high quality items (Quality 4+)
-                // Search() automatically downgrades quality if no items are found at the requested level.
+                // 搜索高质量物品（质量等级4+）
+                // Search() 会在请求级别未找到任何项目时自动降低质量。
                 var filter = new ItemFilter
                 {
                     minQuality = 4,
@@ -449,7 +449,7 @@ namespace BloodMoon
                 
                 if (ids != null && ids.Length > 0)
                 {
-                    // Add 1-3 random high-quality items
+                    // 添加1-3件随机高质量物品
                     int count = UnityEngine.Random.Range(1, 4);
                     for (int i = 0; i < count; i++)
                     {
@@ -459,7 +459,7 @@ namespace BloodMoon
                         {
                             if (!c.CharacterItem.Inventory.AddAndMerge(item))
                             {
-                                // If inventory is full, just drop it at the boss's feet
+                                // 若库存已满，则将其直接放置于领袖脚下
                                 item.Drop(c.transform.position, true, Vector3.up, 360f);
                             }
                         }
@@ -477,7 +477,7 @@ namespace BloodMoon
 
         private void AddBossGlow(CharacterMainControl c)
         {
-            // Add Point Light
+            // 添加点光源
             var lightObj = new GameObject("BossGlowLight");
             lightObj.transform.SetParent(c.transform);
             lightObj.transform.localPosition = Vector3.up * 1.5f;
@@ -488,15 +488,15 @@ namespace BloodMoon
             light.intensity = 4.0f;
             light.shadows = LightShadows.Soft;
 
-            // Modify Materials for Emission
-            // Optimization: Only runs once per boss initialization
+            // 修改材料以实现排放
+            // 优化：仅在 boss 初始化时运行一次
             var renderers = c.GetComponentsInChildren<Renderer>();
             foreach (var r in renderers)
             {
                 if (r is ParticleSystemRenderer) continue;
                 
-                // Using .materials creates a unique instance, ensuring we only glow this specific Boss
-                // and not other enemies sharing the same model.
+                // 使用.materials 创建一个唯一实例，确保我们仅使这个特定 Boss 发光
+                // 且不存在其他具有相同模型的敌人。
                 var mats = r.materials;
                 for (int i = 0; i < mats.Length; i++)
                 {
@@ -549,14 +549,14 @@ namespace BloodMoon
                 ai.forceTracePlayerDistance = 100f;
             }
             
-            // Ensure AI is initialized (Should be handled by EnhanceBoss, but double check)
+            // 确保AI已初始化（应由EnhanceBoss处理，但需进行双重检查）
             var custom = c.GetComponent<BloodMoonAIController>();
             if (custom != null && custom.CanChase == false)
             {
                 custom.SetChaseDelay(0f);
             }
             
-            // Random Taunt
+            // 随机嘲讽
             string[] taunts = { "Boss_Revenge", "Boss_Taunt_1", "Boss_Taunt_2", "Boss_Taunt_3" };
             string key = taunts[UnityEngine.Random.Range(0, taunts.Length)];
             c.PopText(Localization.Get(key));
@@ -585,21 +585,21 @@ namespace BloodMoon
             bool hasMelee = false;
             bool hasGun = false;
             
-            // Check if character already has weapons
+            // 检查角色是否已拥有武器
             if (character.MeleeWeaponSlot()?.Content != null) hasMelee = true;
             if (character.PrimWeaponSlot()?.Content != null) hasGun = true;
             if (character.SecWeaponSlot()?.Content != null) hasGun = true;
             
-            // If character has both melee and gun, we're good
+            // 如果角色同时具备近战和枪械能力，则符合要求
             if (hasMelee && hasGun) return;
             
-            // Try to add melee weapon if missing
+            // 尝试添加近战武器（若缺失）
             if (!hasMelee)
             {
                 await TryAddMeleeWeapon(character);
             }
             
-            // Try to add gun if missing
+            // 若缺失，请尝试添加枪支
             if (!hasGun)
             {
                 await TryAddGun(character);
@@ -701,7 +701,7 @@ namespace BloodMoon
 
         private void AssignWingIndicesForLeader(CharacterMainControl boss)
         {
-            // Optimization: Use cached characters from Store
+            // 优化：使用存储中的缓存字符
             var controllers = new List<AICharacterController>();
             var all = _store.AllCharacters;
             int count = all.Count;
@@ -724,7 +724,7 @@ namespace BloodMoon
             }
             try
             {
-                // Use Persistent ID (Preset Name) instead of transient InstanceID
+                // 使用持久ID（预设名称）而非瞬态InstanceID
                 string id = boss.characterPreset != null ? boss.characterPreset.name : boss.name;
                 
                 float armorBody = 0f;
@@ -741,7 +741,7 @@ namespace BloodMoon
             for (int i = 0; i < followers.Count; i++)
             {
                 var f = followers[i];
-                if (f == null) continue; // Safety check
+                if (f == null) continue; // 安全检查
                 
                 var ctrl = f.gameObject.GetComponent<BloodMoonAIController>();
                 if (ctrl == null)
@@ -776,7 +776,7 @@ namespace BloodMoon
             if (!_initialized) return;
             if (!LevelManager.Instance || !LevelManager.Instance.IsRaidMap || LevelManager.Instance.IsBaseLevel) return;
             
-            // Ensure clean state before starting
+            // 在开始前确保处于清洁状态
             if (!_setupRunning && !_sceneSetupDone) 
             {
                  if (_bloodMoonActive && Time.time - _bloodMoonStartTime > _bloodMoonDurationSec)
@@ -794,22 +794,22 @@ namespace BloodMoon
 
             UniTask.Void(async () =>
             {
-                // Wait for Level Initialization to settle (Avoid race conditions with Game's Spawners)
+                // 等待关卡初始化完成（避免与游戏生成器的竞态条件）
                 await UniTask.Delay(3000); 
 
                 await UniTask.Yield();
 
-                // --- Synchronous Initialization Phase ---
-                // Immediately capture and disable vanilla spawners to prevent interference
+                // --- 同步初始化阶段 ---
+                // 立即捕获并禁用原生生成器以防止干扰
                 _pointsCache.Clear();
                 _disabledSpawners.Clear();
 
-                // 1. Capture Points & Limit Native Spawners (Do not disable)
+                // 1. 捕获生成点并限制原生生成器（不禁用）
                 var spawners = UnityEngine.Object.FindObjectsOfType<RandomCharacterSpawner>();
                 foreach (var s in spawners) 
-                { 
+                {
                     if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints);
-                    // Limit quantity to avoid overcrowding
+                    // 限制数量以避免过度拥挤
                     // s.spawnCountRange = new Vector2Int(1, 1);
                 }
                 
@@ -817,21 +817,21 @@ namespace BloodMoon
 
                 var waveSpawners = UnityEngine.Object.FindObjectsOfType<WaveCharacterSpawner>();
                 foreach (var s in waveSpawners) 
-                { 
+                {
                     if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints);
-                    // Limit quantity to avoid overcrowding
+                    // 限制数量以避免过度拥挤
                     // s.spawnCountRange = new Vector2Int(1, 1);
                 }
 
                 // -----------------------------------
 
-                // 2. Initial Map Metrics Calculation
-                // RecalculateMapMetrics(); // Removed
+                // 2. 初始地图指标计算
+                // RecalculateMapMetrics(); // 已移除
                 
-                // 3. Initial Disable of any pre-existing vanilla AI
+                // 3. 初始禁用任何预先存在的原生AI
                 _charactersCache.Clear();
                 _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
-                // DisableVanillaControllersCached();
+                // 禁用Vanilla控制器缓存();
                 try 
                 {
                     if (CharacterMainControl.Main == null) await UniTask.WaitUntil(() => CharacterMainControl.Main != null);
@@ -846,15 +846,15 @@ namespace BloodMoon
                     int scene = MultiSceneCore.MainScene.HasValue ? MultiSceneCore.MainScene.Value.buildIndex : SceneManager.GetActiveScene().buildIndex;
                     _processed.Clear();
                     
-                    // Re-scan characters in case player appeared
+                    // 重新扫描角色，以防玩家出现
                     _charactersCache.Clear();
                     _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
-                    // DisableVanillaControllersCached();
+                    // 禁用Vanilla控制器缓存();
 
                     _currentScene = scene;
                     _sceneSetupDone = false;
                     
-                    // Identify all available raid scenes from points
+                    // 从生成点识别所有可用的突袭场景
                     var availableScenes = new List<int>();
                     foreach(var p in _pointsCache)
                     {
@@ -876,11 +876,11 @@ namespace BloodMoon
                     {
                         var rnd = new System.Random();
                         int bossCount = ModConfig.Instance.BossCount;
-                        bossCount = Mathf.Clamp(bossCount, 1, 5); // Limit between 1 and 5 bosses
+                        bossCount = Mathf.Clamp(bossCount, 1, 5); // 限制在1到5个Boss之间
                         selected = allBossPresets.OrderBy(_ => rnd.Next()).Take(bossCount).ToArray();
                     });
 
-                    // Force return to Main Thread to ensure Unity API safety
+                    // 强制返回主线程以确保Unity API安全
                     await UniTask.SwitchToMainThread();
 
                     _selectedBossPresets.Clear();
@@ -897,23 +897,23 @@ namespace BloodMoon
                             int targetScene = availableScenes[sceneCursor % availableScenes.Count];
                             sceneCursor++;
 
-                            // Use default behavior (Vector3.zero usually implies random/default spawn point in CreateCharacterAsync if supported, 
-                            // but CreateCharacterAsync usually requires a position. 
-                            // However, the user request says "Official system determines location". 
-                            // If we pass Vector3.zero, it might spawn at (0,0,0). 
-                            // But CharacterRandomPreset.CreateCharacterAsync typically takes a position.
-                            // If we want "Official System", we might need to find a valid random point using Game's own utility or just use one of the Points we found earlier without custom logic.
-                            // Actually, the user says "Delete our mod's code and logic for interfering with enemy position".
-                            // This implies we should just pick a valid random spawn point from the map's defined points (which is what the official system would do) 
-                            // OR just pass a simple point and let the navmesh/game handle it.
-                            // Since `CreateCharacterAsync` REQUIRES a position, we must provide one.
-                            // The "Official System" for random spawns usually picks a `Points` object.
-                            // So we will just pick a random `Points` from `_pointsCache` and use its position, removing all our custom "Search/Filter/Avoid/Fallback" logic.
+                            // 使用默认行为（Vector3.zero通常意味着CreateCharacterAsync中的随机/默认生成点（如果支持），
+                            // 但CreateCharacterAsync通常需要一个位置。
+                            // 然而，"官方系统决定位置"。
+                            // 如果我们传递Vector3.zero，它可能会生成在(0,0,0)。
+                            // 但CharacterRandomPreset.CreateCharacterAsync通常需要一个位置。
+                            // 如果我们想要"官方系统"，我们可能需要使用游戏自己的工具找到一个有效的随机点，或者直接使用我们之前找到的一个生成点，不使用自定义逻辑。
+                            // 实际上，"删除我们模组中干扰敌人位置的代码和逻辑"。
+                            // 这意味着我们应该从地图定义的生成点中选择一个有效的随机生成点（这是官方系统会做的）
+                            // 或者只传递一个简单的点，让导航网格/游戏处理它。
+                            // 由于`CreateCharacterAsync`需要一个位置，我们必须提供一个。
+                            // 随机生成的"官方系统"通常会选择一个`Points`对象。
+                            // 所以我们将从`_pointsCache`中选择一个随机的`Points`并使用其位置，移除所有自定义的"搜索/过滤/躲避/回退"逻辑。
                             
                             Vector3 anchor = Vector3.zero;
                             bool found = false;
                             
-                            // Simple Random Pick from Cache
+                            // 从缓存中简单随机选择
                             if (_pointsCache != null && _pointsCache.Count > 0)
                             {
                                 try 
@@ -931,8 +931,8 @@ namespace BloodMoon
                             
                             if (!found)
                             {
-                                // Fallback if no points cache (unlikely in raid)
-                                if (player != null) anchor = player.transform.position; 
+                                // 若无生成点缓存则回退（在突袭中不太可能）
+                                if (player != null) anchor = player.transform.position;
                             }
                             
                             try
@@ -940,7 +940,7 @@ namespace BloodMoon
                                 var clone = await preset.CreateCharacterAsync(anchor, Vector3.forward, targetScene, null, false);
                                 if (clone != null)
                                 {
-                                    // Wait longer to ensure full initialization (Animator, MagicBlend, etc.)
+                                    // 等待更长时间以确保完全初始化（Animator、MagicBlend等）
                                     await UniTask.Yield(PlayerLoopTiming.Update); 
                                     await UniTask.Delay(1000); 
                                     
@@ -967,7 +967,7 @@ namespace BloodMoon
             }
         }
 
-                    // DisableVanillaControllersCached();
+                    // 禁用Vanilla控制器缓存();
                     _sceneSetupDone = true;
                 }
                 catch (System.Exception e)

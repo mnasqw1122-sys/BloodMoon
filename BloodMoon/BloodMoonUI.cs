@@ -38,8 +38,8 @@ namespace BloodMoon
         }
 
         private string _lastTimeStr = string.Empty;
-        private Color _baseColor = new Color(1f, 0.2f, 0.2f); // Red
-        private Color _activeColor = new Color(1f, 0f, 0f); // Deep Red
+        private Color _baseColor = new Color(1f, 0.2f, 0.2f); // 红色
+        private Color _activeColor = new Color(1f, 0f, 0f); // 深红色
 
         public void Refresh(TimeSpan now)
         {
@@ -50,7 +50,7 @@ namespace BloodMoon
             var label = active ? Localization.Get("Event_Active") : Localization.Get("Event_Incoming");
             var timeStr = $"{Mathf.FloorToInt((float)remain.TotalHours):000}:{remain.Minutes:00}";
             
-            // 1. Text Content
+            // 1. 文本内容
             string difficultyStr = "";
             if (BloodMoon.AI.AdaptiveDifficulty.Instance != null)
             {
@@ -66,19 +66,19 @@ namespace BloodMoon
                 _lastTimeStr = fullStr;
             }
 
-            // 2. Visual Effects (Pulse)
+            // 2. 视觉效果（脉冲）
             float pulseSpeed = active ? 4.0f : 1.0f;
-            float alpha = Mathf.PingPong(Time.time * pulseSpeed, 0.5f) + 0.5f; // 0.5 to 1.0
+            float alpha = Mathf.PingPong(Time.time * pulseSpeed, 0.5f) + 0.5f; // 0.5 到 1.0
             
             if (active)
             {
                 _title.color = new Color(_activeColor.r, _activeColor.g, _activeColor.b, alpha);
-                // Shake effect if very active
+                // 如果非常活跃，添加抖动效果
                 _title.rectTransform.anchoredPosition += UnityEngine.Random.insideUnitCircle * 0.5f;
             }
             else
             {
-                // Orange/Yellow warning
+                // 橙色/黄色警告
                 _title.color = new Color(1f, 0.6f, 0f, alpha);
             }
         }

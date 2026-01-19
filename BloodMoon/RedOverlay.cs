@@ -9,17 +9,17 @@ namespace BloodMoon
         private float _transitionProgress; // 0 to 1
         private const float TRANSITION_SPEED = 0.5f;
         
-        // Original Settings Backup
+        // 原始设置备份
         private Color _origFogColor;
         private float _origFogDensity;
         private FogMode _origFogMode;
         private bool _origFogEnabled;
         private Color _origAmbient;
         
-        // Target Settings
-        // Deep crimson red
+        // 目标设置
+        // 深红色
         private Color _targetFogColor = new Color(0.6f, 0.02f, 0.02f, 1f); 
-        // Thick enough to obscure vision beyond ~40-50m
+        // 足够厚以在约40-50米外遮挡视线
         private float _targetDensity = 0.025f; 
         
         private bool _captured;
@@ -38,7 +38,7 @@ namespace BloodMoon
             if (_isActive)
             {
                 _isActive = false;
-                // Transition will handle the rest in Tick
+                // 过渡将在Tick中处理其余部分
             }
         }
 
@@ -57,17 +57,17 @@ namespace BloodMoon
 
         public void Tick(float dt)
         {
-            // Safety: Check scene validity
+            // 安全性：检查场景有效性
             var currentScene = SceneManager.GetActiveScene();
             if (_captured && currentScene != _capturedScene)
             {
-                // Scene changed! Our captured data is invalid for this new scene.
-                // Reset capture state so we capture the NEW scene's defaults next frame
+                // 场景已更改！我们捕获的数据对此新场景无效
+                // 重置捕获状态，以便我们在下一帧捕获新场景的默认值
                 _captured = false; 
-                // Don't restore old scene's settings to new scene
+                // 不要将旧场景的设置恢复到新场景
             }
 
-            // Calculate Transition
+            // 计算过渡
             if (_isActive)
             {
                 _transitionProgress = Mathf.MoveTowards(_transitionProgress, 1f, dt * TRANSITION_SPEED);
@@ -81,43 +81,43 @@ namespace BloodMoon
             {
                 if (_captured)
                 {
-                    // Restore exact originals when fully faded out
+                    // 完全淡出时恢复确切的原始值
                     RestoreOriginals();
                 }
                 return;
             }
 
-            // If we haven't captured yet (safety)
+            // 如果我们尚未捕获（安全性）
             if (!_captured) CaptureOriginals();
 
-            // Apply Effect
+            // 应用效果
             ApplyBloodMoonAtmosphere();
         }
 
         private void ApplyBloodMoonAtmosphere()
         {
             RenderSettings.fog = true;
-            // Force Exp2 for best volumetric feel
+            // 强制使用Exp2以获得最佳体积感
             RenderSettings.fogMode = FogMode.ExponentialSquared; 
 
-            // Pulse effect for "breathing" atmosphere
-            float pulse = Mathf.Sin(Time.time * 0.8f) * 0.2f + 1.0f; // 0.8 to 1.2, slower and deeper
+            // "呼吸"大气效果的脉冲效果
+            float pulse = Mathf.Sin(Time.time * 0.8f) * 0.2f + 1.0f; // 0.8 到 1.2，更慢更深
             
             float t = _transitionProgress;
             
-            // Color Gradient: Start normal, fade to Red
+            // 颜色渐变：从正常开始，淡入红色
             Color bloodColor = _targetFogColor * pulse;
-            // Clamp brightness to avoid neon fog, but allow some overbright for bloom
+            // 限制亮度以避免霓虹雾，但允许一些过亮用于泛光效果
             bloodColor.r = Mathf.Clamp(bloodColor.r, 0f, 1.2f); 
             
             RenderSettings.fogColor = Color.Lerp(_origFogColor, bloodColor, t);
             
-            // Density
-            float bloodDensity = _targetDensity * (pulse * 0.5f + 0.5f); // Vary density more
+            // 密度
+            float bloodDensity = _targetDensity * (pulse * 0.5f + 0.5f); // 更多变化密度
             RenderSettings.fogDensity = Mathf.Lerp(_origFogDensity, bloodDensity, t);
             
-            // Ambient Light: Darken the world to make the fog glow more prominent
-            // Pulse ambient inversely to fog (more fog = darker ambient)
+            // 环境光：使世界变暗以使雾光更突出
+            // 与环境光脉冲相反（更多雾 = 更暗的环境光）
             Color bloodAmbient = new Color(0.2f, 0.02f, 0.02f) * (2.0f - pulse);
             RenderSettings.ambientLight = Color.Lerp(_origAmbient, bloodAmbient, t);
         }

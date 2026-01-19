@@ -8,10 +8,10 @@ namespace BloodMoon.AI
     [Serializable]
     public class NeuralNetwork
     {
-        public int[] Layers; // Layer sizes: [Inputs, Hidden1, ..., Outputs]
-        public float[][][] Weights; // [layer][neuron][input]
-        public float[][] Biases; // [layer][neuron]
-        public float[][] Neurons; // [layer][neuron] -> output value
+        public int[] Layers; // 层大小：[输入, 隐藏1, ..., 输出]
+        public float[][][] Weights; // [层][神经元][输入]
+        public float[][] Biases; // [层][神经元]
+        public float[][] Neurons; // [层][神经元] -> 输出值
 
         public NeuralNetwork(int[] layers)
         {
@@ -26,7 +26,7 @@ namespace BloodMoon.AI
             {
                 Neurons[i] = new float[layers[i]];
                 
-                if (i > 0) // Input layer has no weights/biases
+                if (i > 0) // 输入层没有权重/偏置
                 {
                     int prevLayerSize = layers[i - 1];
                     Weights[i] = new float[layers[i]][];
@@ -44,7 +44,7 @@ namespace BloodMoon.AI
         {
             if (Weights == null || Biases == null)
             {
-                 // Should not happen if constructor called correctly, but safety first
+                 // 如果构造函数正确调用，这不应该发生，但安全第一
                  return;
             }
 
@@ -61,7 +61,7 @@ namespace BloodMoon.AI
                 }
             }
             
-            for (int i = 1; i < Biases.Length; i++) // Skip input layer biases
+            for (int i = 1; i < Biases.Length; i++) // 跳过输入层偏置
             {
                 if (Biases[i] == null) continue;
                 for (int j = 0; j < Biases[i].Length; j++)
@@ -73,34 +73,34 @@ namespace BloodMoon.AI
 
         public float[] FeedForward(float[] inputs)
         {
-            // Set input layer
+            // 设置输入层
             for (int i = 0; i < inputs.Length; i++)
             {
                 Neurons[0][i] = inputs[i];
             }
 
-            // Propagate
+            // 信息
             for (int i = 0; i < Layers.Length - 1; i++)
             {
                 int currentLayerIdx = i;
                 int nextLayerIdx = i + 1;
 
-                // For each neuron in next layer
+                // 对于下一层中的每个神经元
                 for (int nextNode = 0; nextNode < Layers[nextLayerIdx]; nextNode++)
                 {
                     float value = 0f;
 
-                    // Sum weighted inputs from current layer
-                    // Weights[nextLayerIdx][nextNode] contains weights for inputs from currentLayerIdx
+                    // 对当前层的输入进行加权求和
+                    // Weights[nextLayerIdx][nextNode] 包含来自当前层（currentLayerIdx）的输入权重
                     for (int currentNode = 0; currentNode < Layers[currentLayerIdx]; currentNode++)
                     {
                         value += Neurons[currentLayerIdx][currentNode] * Weights[nextLayerIdx][nextNode][currentNode];
                     }
 
-                    // Add bias
+                    // 添加偏见
                     value += Biases[nextLayerIdx][nextNode];
 
-                    // Activation
+                    // 激活
                     if (nextLayerIdx == Layers.Length - 1)
                     {
                         Neurons[nextLayerIdx][nextNode] = Sigmoid(value);

@@ -12,7 +12,7 @@ namespace BloodMoon
     [Serializable]
     public class AIDataStore
     {
-        // Global Data (IQ / Tactics) - Shared across all maps
+        // 全局数据（智商/战术）- 在所有地图间共享
         [Serializable]
         private class GlobalSaveData
         {
@@ -38,7 +38,7 @@ namespace BloodMoon
             }
         }
 
-        // Map Specific Data (Memory / Danger) - Separate per map
+        // 地图特定数据（记忆/危险）- 每个地图单独
         [Serializable]
         private class MapSaveData
         {
@@ -78,7 +78,7 @@ namespace BloodMoon
 
         public void MarkStuckSpot(Vector3 pos)
         {
-            // Cluster check
+            // 集群检查
             for (int i = 0; i < StuckSpots.Count; i++)
             {
                 if ((StuckSpots[i] - pos).sqrMagnitude < 4.0f) return;
@@ -99,12 +99,12 @@ namespace BloodMoon
 
         public void MarkPlayerAmbush(Vector3 playerPos)
         {
-            // Cluster check
+            // 避免重复记录
             for (int i = 0; i < PlayerAmbushSpots.Count; i++)
             {
                 if ((PlayerAmbushSpots[i] - playerPos).sqrMagnitude < 4.0f)
                 {
-                    // Already known spot
+                    // 已知位置
                     return;
                 }
             }
@@ -161,14 +161,14 @@ namespace BloodMoon
         }
         public List<LeaderPref> LeaderPrefs = new List<LeaderPref>();
         
-        // Runtime Cache for O(1) lookup
+        // 运行时缓存用于O(1)查找
         private Dictionary<string, int> _leaderPrefIndexCache = new Dictionary<string, int>();
 
         public void RecordPlayerSpeed(float v)
         {
             if (v > 0.05f && v < 15f)
             {
-                // Exponential Moving Average (EMA) with alpha = 0.05
+                // 指数移动平均（EMA），alpha = 0.05
                 _avgPlayerSpeed = Mathf.Lerp(_avgPlayerSpeed, v, 0.05f);
             }
         }
@@ -238,7 +238,7 @@ namespace BloodMoon
 
         private string GetSaveDirectory()
         {
-            // Use BepInEx config path or UserData path if available, otherwise relative to executable
+            // 若存在 BepInEx 配置路径或用户数据路径，则使用该路径；否则使用相对于可执行文件的路径
             string root = Directory.GetParent(Application.dataPath).FullName;
             string path = Path.Combine(root, "UserData", FolderName);
             if (!Directory.Exists(path))
@@ -261,13 +261,13 @@ namespace BloodMoon
             {
                 string dir = GetSaveDirectory();
 
-                // 1. Save Global Data
+                // 1. 保存全球数据
                 var globalData = new GlobalSaveData();
                 globalData.FromStore(this);
                 string globalJson = JsonUtility.ToJson(globalData, true);
                 File.WriteAllText(Path.Combine(dir, GlobalFileName), globalJson);
 
-                // 2. Save Map Data
+                // 2. 保存地图数据
                 var mapData = new MapSaveData();
                 mapData.FromStore(this);
                 string mapJson = JsonUtility.ToJson(mapData, true);
@@ -285,7 +285,7 @@ namespace BloodMoon
             {
                 string dir = GetSaveDirectory();
 
-                // 1. Load Global Data
+                // 1. 加载全局数据
                 string globalPath = Path.Combine(dir, GlobalFileName);
                 if (File.Exists(globalPath))
                 {
@@ -295,14 +295,14 @@ namespace BloodMoon
                 }
                 else
                 {
-                    // Defaults for global
+                    // 全局的默认设置
                     _avgPlayerSpeed = 3.0f;
                     ApproachStats = new List<ApproachStat>();
                     StrategyWeights = new List<KeyWeight>();
                     LeaderPrefs = new List<LeaderPref>();
                 }
 
-                // 2. Load Map Data
+                // 2. 加载地图数据
                 string mapPath = Path.Combine(dir, GetMapFileName());
                 if (File.Exists(mapPath))
                 {
@@ -312,7 +312,7 @@ namespace BloodMoon
                 }
                 else
                 {
-                    // Defaults for map
+                    // 地图的默认设置
                     PlayerAmbushSpots = new List<Vector3>();
                     StuckSpots = new List<Vector3>();
                     DangerEvents = new List<DangerEvent>();
@@ -333,12 +333,12 @@ namespace BloodMoon
         public bool TryGetKnownCover(CharacterMainControl player, Vector3 center, float searchRadius, out Vector3 coverPos)
         {
             coverPos = Vector3.zero;
-            // Real-time local cover search instead of offline list
+            // 实时本地封面搜索而非离线列表
             var mask = GameplayDataSettings.Layers.wallLayerMask | GameplayDataSettings.Layers.halfObsticleLayer;
-            int samples = 8; // Reduced from 16 for performance
+            int samples = 8; // 为提高性能，已从16减少
             float best = float.NegativeInfinity;
             
-            // Optimization: Cache transform access
+            // 优化：缓存变换访问以避免重复计算
             Vector3 playerPos = player.transform.position;
             
             for (int i = 0; i < samples; i++)
@@ -351,10 +351,10 @@ namespace BloodMoon
                     var origin = p + Vector3.up * 1.0f;
                     var target = playerPos + Vector3.up * 1.2f;
                     var dir = target - origin;
-                    // Check if cover blocks view to player
+                    // 检查遮挡物是否阻挡了对队员的视线
                     if (Physics.Raycast(origin, dir.normalized, dir.magnitude, mask))
                     {
-                        // Found a spot blocked from player view
+                        // 发现一个被玩家视线遮挡的位置
                         float score = -GetHeatAt(p, Time.time, 6f);
                         if (score > best) { best = score; coverPos = p; }
                     }
@@ -428,7 +428,7 @@ namespace BloodMoon
             if (_leaderPrefIndexCache.TryGetValue(id, out int idx))
             {
                 if (idx < LeaderPrefs.Count && LeaderPrefs[idx].id == id) return LeaderPrefs[idx];
-                _leaderPrefIndexCache.Remove(id); // Invalid cache
+                _leaderPrefIndexCache.Remove(id); // 无效的缓存
             }
             
             for (int i = 0; i < LeaderPrefs.Count; i++)
@@ -443,17 +443,17 @@ namespace BloodMoon
             LeaderPrefs.Add(lp);
             _leaderPrefIndexCache[id] = LeaderPrefs.Count - 1;
             
-            // Prune if too large
+            // 如果缓存超过 256 个项，则修剪最旧的项
             if (LeaderPrefs.Count > 256)
             {
-                // Remove oldest
+                // 删除最旧的
                 int oldestIdx = 0; float oldestTime = float.MaxValue;
                 for(int i=0; i<LeaderPrefs.Count; i++)
                 {
                     if (LeaderPrefs[i].lastUpdate < oldestTime) { oldestTime = LeaderPrefs[i].lastUpdate; oldestIdx = i; }
                 }
                 LeaderPrefs.RemoveAt(oldestIdx);
-                _leaderPrefIndexCache.Clear(); // Full rebuild needed
+                _leaderPrefIndexCache.Clear(); // 缓存无效，需要完整重建
             }
             return lp;
         }
@@ -520,14 +520,14 @@ namespace BloodMoon
 
         public void RecordApproachOutcome(Vector3 point, bool success)
         {
-            // Grid Snap (Quantize) to 2m grid to generalize learning
+            // 将网格捕捉（量化）到2米网格以实现学习的泛化
             point = new Vector3(
                 Mathf.Round(point.x / 2f) * 2f,
-                Mathf.Round(point.y / 1f) * 1f, // Y matters less but snap to 1m
+                Mathf.Round(point.y / 1f) * 1f, // Y 的重要性降低，但需精确对齐至 1 米
                 Mathf.Round(point.z / 2f) * 2f
             );
 
-            int idx = -1; float minDist = 0.5f; // Since we snap, exact match is likely
+            int idx = -1; float minDist = 0.5f; // 由于我们量化到 2m 网格，因此精确匹配的可能性较高
             for (int i = 0; i < ApproachStats.Count; i++)
             {
                 if (Vector3.Distance(ApproachStats[i].pos, point) < minDist) { idx = i; break; }
@@ -543,12 +543,12 @@ namespace BloodMoon
                 st.lastTime = Time.time;
                 ApproachStats[idx] = st;
             }
-            if (ApproachStats.Count > 120) ApproachStats.RemoveAt(0); // Increased buffer
+            if (ApproachStats.Count > 120) ApproachStats.RemoveAt(0); // 增加的缓冲区
         }
 
         public float GetApproachWeight(Vector3 point)
         {
-            // Quantize to match recording (Model lookup)
+            // 量化以匹配（模型查找）
             point = new Vector3(
                 Mathf.Round(point.x / 2f) * 2f,
                 Mathf.Round(point.y / 1f) * 1f,
@@ -564,18 +564,18 @@ namespace BloodMoon
                     float s = Mathf.Max(0, st.success);
                     float f = Mathf.Max(0, st.fail);
                     float recency = Mathf.Exp(-Mathf.Max(0f, Time.time - st.lastTime) / 120f);
-                    // Thompson Sampling-ish heuristic: (success + 1) / (total + 2)
-                    // But here we want a weight multiplier.
-                    // If high success -> weight > 1. If high fail -> weight < 1.
+                    // 采样的启发式方法：(成功次数 + 1) / (总次数 + 2)
+                    // 但在这里我们想要一个权重乘数。
+                    // 如果成功概率高，则权重 > 1。如果失败概率高，则权重 < 1。
                     float total = s + f;
                     if (total > 0)
                     {
                         float rate = s / total;
-                        // Bias towards 1.0 if low samples (recency decay also lowers confidence)
+                        // 偏向 1.0 如果样本量低（最近性衰减也降低了置信度）
                         w = Mathf.Lerp(1.0f, rate * 2.0f, Mathf.Clamp01(total / 5f) * recency); 
-                        // Map 0..1 rate to 0.5..1.5 multiplier range? Or 0..2?
-                        // Let's say: rate 0.5 -> 1.0. rate 1.0 -> 2.0. rate 0.0 -> 0.0?
-                        // If we fail a lot, we want to discourage (w < 1).
+                        // 将 0..1 率映射到 0.5..1.5 乘数范围？或 0..2？
+                        // 让我们说：率 0.5 -> 1.0。率 1.0 -> 2.0。率 0.0 -> 0.0？
+                        // 如果我们失败很多次，我们想阻止 (w < 1).
                     }
                     break;
                 }
@@ -583,7 +583,7 @@ namespace BloodMoon
             return w;
         }
 
-        // Runtime Engagement Tracking (Not serialized)
+        // 运行时参与跟踪（非序列化）
         private Dictionary<int, List<CharacterMainControl>> _engagements = new Dictionary<int, List<CharacterMainControl>>();
 
         public void RegisterEngagement(CharacterMainControl target, CharacterMainControl attacker)
@@ -594,7 +594,7 @@ namespace BloodMoon
             
             var list = _engagements[id];
             
-            // Cleanup nulls while we are here to keep list healthy
+            // 清理空值，以保持列表的健康状态
             for (int i = list.Count - 1; i >= 0; i--)
             {
                 if (list[i] == null) list.RemoveAt(i);
@@ -617,7 +617,7 @@ namespace BloodMoon
             int id = target.GetInstanceID();
             if (!_engagements.ContainsKey(id)) return 0;
             var list = _engagements[id];
-            // Lazy cleanup
+            // 清理
             for (int i = list.Count - 1; i >= 0; i--)
             {
                 if (list[i] == null || !list[i].gameObject.activeInHierarchy || list[i].Health.CurrentHealth <= 0)
@@ -626,7 +626,7 @@ namespace BloodMoon
             return list.Count;
         }
 
-        // --- Global Character Cache & Spatial Grid ---
+        // --- 全局字符缓存与空间网格 ---
         
         private List<CharacterMainControl> _globalCharacterCache = new List<CharacterMainControl>();
         private float _lastCacheUpdateTime;
@@ -650,7 +650,7 @@ namespace BloodMoon
                 }
             }
             
-            // Rebuild Spatial Grid
+            // 重建空间网格
             _spatialGrid.Clear();
             foreach(var c in _globalCharacterCache)
             {
@@ -662,7 +662,7 @@ namespace BloodMoon
     public class SpatialGrid
     {
         private Dictionary<Vector2Int, List<CharacterMainControl>> _grid = new Dictionary<Vector2Int, List<CharacterMainControl>>();
-        private float _cellSize = 15f; // Cell size
+        private float _cellSize = 15f; // 大小
         
         public void Clear() => _grid.Clear();
         

@@ -12,17 +12,17 @@ namespace BloodMoon.AI
         private bool _isInitialized = false;
         private string _brainPath;
 
-        // Feature Indices
-        // 0: Health %
-        // 1: Dist to Target (normalized)
-        // 2: Has LoS (0 or 1)
-        // 3: Pressure (normalized)
-        // 4: Ammo %
-        // 5: Is Reloading
-        // 6: Personality Aggression
-        // 7: Personality Caution
-        // 8: Personality Teamwork
-        // 9: Target Health % (if known)
+        // 特征索引
+        // 0: 生命值百分比
+        // 1: 到目标的距离（归一化）
+        // 2: 是否有视线（0或1）
+        // 3: 压力（归一化）
+        // 4: 弹药百分比
+        // 5: 是否正在装弹
+        // 6: 性格攻击性
+        // 7: 性格谨慎性
+        // 8: 性格团队合作
+        // 9: 目标生命值百分比（如果已知）
         private const int INPUT_SIZE = 10;
         
         private Dictionary<string, float> _actionWeights = new Dictionary<string, float>
@@ -42,9 +42,9 @@ namespace BloodMoon.AI
         public NeuralDecisionMaker(List<string> actionNames)
         {
             _actionNames = actionNames;
-            // Input: 10 features
-            // Hidden: 16 neurons
-            // Output: Number of actions
+            // 输入：10个特征
+            // 隐藏层：16个神经元
+            // 输出：动作数量
             
             _brainPath = Path.Combine(BloodMoon.Utils.Logger.ModDirectory, "global_brain.json");
             
@@ -53,10 +53,10 @@ namespace BloodMoon.AI
                  try {
                     string json = File.ReadAllText(_brainPath);
                     _network = NeuralNetwork.LoadFromString(json);
-                    // Check topology match
+                    // 检查拓扑匹配
                     if (_network == null || _network.Layers == null || _network.Layers.Length < 1 || _network.Layers[0] != INPUT_SIZE)
                     {
-                        // Structure mismatch or load failed, reset
+                        // 结构不匹配或加载失败，请重置
                         CreateNewNetwork();
                     }
                  } catch { CreateNewNetwork(); }
@@ -79,12 +79,12 @@ namespace BloodMoon.AI
 
         public void ReportPerformance(float survivalTime, int kills, int damageDealt)
         {
-            // Simple fitness function
+            // 简单的适应度函数
             float fitness = survivalTime + (kills * 50f) + (damageDealt * 0.1f);
             
-            // If this AI did exceptionally well, save its brain as the new baseline
-            // Thresholds should ideally be dynamic or high enough
-            if (fitness > 500f) // Example threshold
+            // 如果这个AI表现得非常出色，就将其大脑保存为新的基准模型
+            // 阈值应理想地具有动态性或足够高
+            if (fitness > 500f) // 示例阈值
             {
                 try {
                     string json = _network.SaveToString();
@@ -109,7 +109,7 @@ namespace BloodMoon.AI
                     string action = _actionNames[i];
                     float baseScore = outputs[i];
                     
-                    // Apply static weight
+                    // 应用静态权重
                     if (_actionWeights.TryGetValue(action, out float w))
                     {
                         baseScore *= w;
@@ -126,7 +126,7 @@ namespace BloodMoon.AI
 
         private void ApplyContextAdjustment(Dictionary<string, float> scores, AIContext ctx)
         {
-            // Low Health -> Increase Heal/Retreat/Cover
+            // 低生命值 -> 增加治疗/撤退/掩护
             float hpPercent = ctx.Character != null ? ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth : 1f;
             if (hpPercent < 0.3f)
             {
@@ -136,7 +136,7 @@ namespace BloodMoon.AI
                 if (scores.ContainsKey("Engage")) scores["Engage"] *= 0.5f;
             }
 
-            // Low Ammo -> Decrease Engage, Increase Reload
+            // 弹药不足 -> 降低攻击，增加装填
             var gun = ctx.Character?.GetGun();
             if (gun != null && gun.BulletCount == 0)
             {
@@ -158,7 +158,7 @@ namespace BloodMoon.AI
                 f[5] = ctx.IsReloading ? 1f : 0f;
             }
 
-            f[1] = Mathf.Clamp01(ctx.DistToTarget / 50f); // Normalize 0-50m
+            f[1] = Mathf.Clamp01(ctx.DistToTarget / 50f); // 将0-50米标准化
             f[2] = ctx.HasLoS ? 1f : 0f;
             f[3] = Mathf.Clamp01(ctx.Pressure / 10f);
 
@@ -172,7 +172,7 @@ namespace BloodMoon.AI
             }
             else
             {
-                f[9] = 1f; // Assume full health if unknown
+                f[9] = 1f; // 若健康状况未知，则假设为完全健康
             }
 
             return f;

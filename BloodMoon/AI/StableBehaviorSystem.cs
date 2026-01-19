@@ -24,29 +24,29 @@ namespace BloodMoon.AI
         
         public string GetStableAction(string proposedAction, float actionScore, AIContext ctx, List<string> availableActions, Dictionary<string, float> allScores)
         {
-            // If we are already running an action, check if we should stick with it
+            // 如果我们已经在运行一个动作，检查是否应该坚持它
             if (_behaviorHistory.ContainsKey("Current"))
             {
                 var current = _behaviorHistory["Current"];
                 
-                // If the current action is still valid (score > 0) AND we haven't run it long enough
+                // 如果当前动作仍然有效（分数 > 0）并且我们运行时间不够长
                 if (current.CurrentAction == proposedAction)
                 {
                      UpdateBehaviorHistory(proposedAction);
                      return proposedAction;
                 }
                 
-                // If we are trying to switch
+                // 如果我们试图切换
                 if (current.CurrentDuration < _minActionDuration)
                 {
-                    // If the new action is MUCH better (e.g. score diff > 0.3), allow switch
-                    // Otherwise stick to current
+                    // 如果新动作好得多（例如分数差 > 0.3），允许切换
+                    // 否则坚持当前动作
                     if (allScores.ContainsKey(current.CurrentAction))
                     {
                         float currentScore = allScores[current.CurrentAction];
                         if (actionScore < currentScore + 0.3f)
                         {
-                            // Stick to current
+                            // 坚持当前动作
                             UpdateBehaviorHistory(current.CurrentAction);
                             return current.CurrentAction;
                         }
@@ -54,13 +54,13 @@ namespace BloodMoon.AI
                 }
             }
             
-            // Check specific action cooldowns
+            // 检查特定动作的冷却时间
             if (_behaviorHistory.ContainsKey(proposedAction))
             {
                 var history = _behaviorHistory[proposedAction];
                 if (history.LastExecutionTime + _cooldownBetweenActions > Time.time)
                 {
-                    // This action is on cooldown, find alternative
+                    // 此操作处于冷却状态，请寻找替代方案
                     return GetAlternativeAction(proposedAction, allScores);
                 }
             }
@@ -71,14 +71,14 @@ namespace BloodMoon.AI
         
         private string GetAlternativeAction(string proposedAction, Dictionary<string, float> scores)
         {
-            string bestAlt = proposedAction; // Default back if no better found
+            string bestAlt = proposedAction; // 如果没有更好的选择，则默认返回
             float bestScore = -1f;
             
             foreach (var kvp in scores)
             {
                 if (kvp.Key == proposedAction) continue;
                 
-                // Check if this alt is on cooldown
+                // 检查此替代方案是否处于冷却状态
                 if (_behaviorHistory.ContainsKey(kvp.Key))
                 {
                     if (_behaviorHistory[kvp.Key].LastExecutionTime + _cooldownBetweenActions > Time.time)
@@ -92,10 +92,10 @@ namespace BloodMoon.AI
                 }
             }
             
-            // If we found a valid alternative
+            // 如果我们找到一个有效的替代方案
             if (bestScore > 0f) return bestAlt;
             
-            // If no valid alternative, we might have to stick with proposed or current
+            // 如果没有有效的替代方案，我们可能不得不坚持现有的或提议的
              if (_behaviorHistory.ContainsKey("Current"))
                  return _behaviorHistory["Current"].CurrentAction;
                  
@@ -111,7 +111,7 @@ namespace BloodMoon.AI
             
             var history = _behaviorHistory[action];
             
-            // Check global current
+            // 检查全球当前情况
             if (!_behaviorHistory.ContainsKey("Current"))
             {
                  _behaviorHistory["Current"] = new BehaviorHistory { CurrentAction = action };
@@ -121,11 +121,11 @@ namespace BloodMoon.AI
             if (current.CurrentAction == action)
             {
                 current.CurrentDuration += Time.deltaTime;
-                history.CurrentDuration += Time.deltaTime; // Also update specific history
+                history.CurrentDuration += Time.deltaTime; // 同时更新特定历史记录
             }
             else
             {
-                // New action started
+                // 已启动新操作
                 current.CurrentAction = action;
                 current.CurrentDuration = 0f;
                 

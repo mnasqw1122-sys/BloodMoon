@@ -21,7 +21,7 @@ namespace BloodMoon.AI
 
         public void AddRange(List<Item> weapons)
         {
-            // Simple logic to populate slots
+            // 简单的槽位填充逻辑
             foreach (var w in weapons)
             {
                 if (w == null) continue;
@@ -34,7 +34,7 @@ namespace BloodMoon.AI
                 {
                     if (MeleeWeapon == null) MeleeWeapon = w;
                 }
-                else if (w.GetComponent<ItemSetting_Skill>()) // Assuming throwable logic
+                else if (w.GetComponent<ItemSetting_Skill>()) // 假设是可投掷物逻辑
                 {
                     if (ThrowableWeapon == null) ThrowableWeapon = w;
                 }
@@ -53,15 +53,15 @@ namespace BloodMoon.AI
             {
                 BloodMoon.Utils.Logger.Log($"[WeaponCache] Preloading weapons for: {weaponName}");
                 
-                // Strategy 1: Try to find by name using enhanced search
-                // Note: ItemFilter doesn't have nameContains property in this version
-                // We'll use tag-based search instead
+                // 策略1：尝试使用增强搜索按名称查找
+                // 注意：此版本中ItemFilter没有nameContains属性
+                // 我们将使用基于标签的搜索代替
                 BloodMoon.Utils.Logger.Log($"[WeaponCache] Searching for weapons with name pattern: {weaponName}");
                 
-                // We'll rely on tag-based search since name search is not available
-                // The actual search will be done in the generic gun/melee searches below
+                // 由于名称搜索不可用，我们将依赖基于标签的搜索
+                // 实际搜索将在下面的通用枪支/近战搜索中完成
                 
-                // Strategy 2: Generic gun search
+                // 策略2：通用枪支搜索
                 var filterGun = new ItemFilter
                 {
                     minQuality = 1,
@@ -94,7 +94,7 @@ namespace BloodMoon.AI
                     BloodMoon.Utils.Logger.Warning($"[WeaponCache] Gun tag search failed: {ex.Message}");
                 }
                 
-                // Strategy 3: Melee weapon search
+                // 策略3：近战武器搜索
                 Tag? meleeTag = GameplayDataSettings.Tags.AllTags.FirstOrDefault(t => t.name == "Melee");
                 Tag? weaponTag = GameplayDataSettings.Tags.AllTags.FirstOrDefault(t => t.name == "Weapon");
                 
@@ -133,11 +133,11 @@ namespace BloodMoon.AI
                     }
                 }
                 
-                // Strategy 4: Fallback to enhanced weapon manager cache
+                // 策略4：回退到增强武器管理器缓存
                 if (_cachedWeaponIds.Count == 0)
                 {
                     BloodMoon.Utils.Logger.Log($"[WeaponCache] No weapons found via search, trying to use EnhancedWeaponManager cache...");
-                    // We'll rely on EnhancedWeaponManager's cache which we've already improved
+                    // 我们将依赖我们已经改进的EnhancedWeaponManager缓存
                 }
                 
                 BloodMoon.Utils.Logger.Log($"[WeaponCache] Preload completed. Total cached weapon IDs: {_cachedWeaponIds.Count}");
@@ -150,16 +150,16 @@ namespace BloodMoon.AI
 
         public Item? GetAvailableWeapon()
         {
-            // Return a new instance of a cached weapon ID
+            // 返回缓存武器ID的新实例
             if (_cachedWeaponIds.Count > 0)
             {
                 int id = _cachedWeaponIds[Random.Range(0, _cachedWeaponIds.Count)];
-                // Note: This needs to be async in real usage, but here we might block or return null if not ready.
-                // For simplicity in this synchronous context, we might need a different approach or return null.
-                // However, the guide implies we can get it. 
-                // In Duckov, instantiation is async. We might need to change the signature or fire-and-forget.
+                // 注意：在实际使用中这需要是异步的，但在这里如果未准备好可能会阻塞或返回null
+                // 为了在这个同步上下文中的简单性，我们可能需要不同的方法或返回null
+                // 然而，指南暗示我们可以获取它
+                // 在Duckov中，实例化是异步的。我们可能需要更改签名或使用fire-and-forget
                 
-                // Since we can't easily wait here synchronously, we will rely on the Async methods in ComprehensiveWeaponSystem
+                // 由于我们无法在此同步等待，我们将依赖ComprehensiveWeaponSystem中的异步方法
                 return null; 
             }
             return null;
@@ -205,7 +205,7 @@ namespace BloodMoon.AI
         
         private void PreloadWeaponResources()
         {
-            // Preload known weapon resources
+            // 预加载已知武器资源
             string[] knownWeapons = {
                 "AK-47", "M4A1", "MP5", "UZI", "Glock", "DesertEagle",
                 "Knife", "Axe", "Bat", "Crowbar", "Machete",
@@ -224,10 +224,10 @@ namespace BloodMoon.AI
             
             try
             {
-                // 0. Ensure weapon manager is initialized
+                // 0.确保武器管理器已初始化
                 await EnhancedWeaponManager.Instance.EnsureInitialized();
                 
-                // 1. Search Inventory First
+                // 1. 先搜索库存
                 foreach (var strategy in _searchStrategies.Values)
                 {
                     var weapons = strategy.SearchInventory(character);
@@ -240,12 +240,12 @@ namespace BloodMoon.AI
                     }
                 }
                 
-                // 2. If missing essentials, try to spawn/find fallback
+                // 2. 如果缺少必需品，尝试生成/寻找备用方案
                 if (weaponSet.PrimaryWeapon == null && weaponSet.SecondaryWeapon == null)
                 {
                     BloodMoon.Utils.Logger.Log($"[WeaponSystem] No guns found in inventory for {character.name}, trying to spawn...");
                     
-                    // Try to spawn a gun (multiple attempts)
+                    // 尝试生成一把枪（多次尝试）
                     Item? gun = null;
                     for (int attempt = 0; attempt < 3 && gun == null; attempt++)
                     {
@@ -266,7 +266,7 @@ namespace BloodMoon.AI
                     }
                     else
                     {
-                        // Try cache
+                        // 尝试缓存
                         BloodMoon.Utils.Logger.Log($"[WeaponSystem] Trying weapon cache for {character.name}...");
                         var cached = await _weaponCache.GetAvailableWeaponAsync();
                         if (cached != null && cached.GetComponent<ItemAgent_Gun>())
@@ -287,7 +287,7 @@ namespace BloodMoon.AI
                 {
                     BloodMoon.Utils.Logger.Log($"[WeaponSystem] No melee weapon found for {character.name}, trying to spawn...");
                     
-                    // Try to spawn a melee weapon (multiple attempts)
+                    // 尝试生成近战武器（多次尝试）
                     Item? melee = null;
                     for (int attempt = 0; attempt < 3 && melee == null; attempt++)
                     {
@@ -371,9 +371,9 @@ namespace BloodMoon.AI
         public override string Type => "Secondary";
         protected override bool IsWeaponType(Item item)
         {
-            // In Duckov, secondary is also a gun, usually pistol. 
-            // We can check size or specific tags if available, but for now any gun fits if primary slot logic handles it.
-            // But strict definition:
+            // 在Duckov中，副武器也是枪支，通常是手枪
+            // 如果有的话，我们可以检查大小或特定标签，但目前如果主槽位逻辑处理它，任何枪支都适用
+            // 但严格定义：
             return item.GetComponent<ItemAgent_Gun>() != null; 
         }
     }
@@ -392,7 +392,7 @@ namespace BloodMoon.AI
         public override string Type => "Throwable";
         protected override bool IsWeaponType(Item item)
         {
-            // Check for grenades/skills
+            // 检查手榴弹/技能
             var ss = item.GetComponent<ItemSetting_Skill>();
             return ss != null && ss.Skill != null && !item.GetComponent<Drug>();
         }

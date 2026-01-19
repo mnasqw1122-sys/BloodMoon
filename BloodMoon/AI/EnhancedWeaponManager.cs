@@ -556,13 +556,13 @@ namespace BloodMoon.AI
         {
              if (gun == null) return false;
              
-             // Check for RPG
+             // 检查RPG
              if (gun.name.Contains("RPG") || gun.name.Contains("Rocket"))
              {
-                 // Try to force generate RPG ammo
-                 // Since we can't easily search by name for ammo without ID, 
-                 // we rely on GenerateBullet.
-                 // If that fails for RPG, we might need to find a compatible ammo ID manually if we knew it.
+                 // 尝试强制生成RPG弹药
+                 // 由于没有ID我们无法轻易按名称搜索弹药，
+                 // 我们依赖GenerateBullet
+                 // 如果这对RPG失败，如果我们知道的话，可能需要手动找到兼容的弹药ID
              }
 
              try
@@ -573,7 +573,7 @@ namespace BloodMoon.AI
                     bullet.StackCount = bullet.MaxStackCount;
                     character.CharacterItem.Inventory.AddAndMerge(bullet);
                     
-                    // Add extra stacks
+                    // 添加额外堆叠
                     for(int i=0; i<3; i++)
                     {
                         var extra = await ItemUtilities.GenerateBullet(gun);

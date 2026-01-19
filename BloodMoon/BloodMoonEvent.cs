@@ -47,9 +47,9 @@ namespace BloodMoon
 
         private void SetRandomOffset()
         {
-            // Use full period range for better randomization
-            // Random.Range for long is not directly supported in older Unity/System versions 
-            // so we construct it
+            // 使用完整周期范围以获得更好的随机化
+            // 在较旧的Unity/System版本中，Random.Range不支持long类型
+            // 因此我们构造它
             double rnd = UnityEngine.Random.value;
             _offsetTicks = (long)(rnd * Period);
         }

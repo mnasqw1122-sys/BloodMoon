@@ -29,7 +29,7 @@ namespace BloodMoon
 
         private void Awake()
         {
-            // Initialize Logger and Config
+            // 初始化日志记录器和配置
             string modDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
             BloodMoon.Utils.Logger.Initialize(modDir);
             ModConfig.Initialize(modDir);
@@ -48,7 +48,7 @@ namespace BloodMoon
             _squadManager = new BloodMoon.AI.SquadManager();
             _squadManager.Initialize();
             
-            // Initialize Weapon Manager Cache Early (async)
+            // 提前初始化武器管理器缓存（异步）
             UniTask.Void(async () =>
             {
                 try
@@ -70,19 +70,19 @@ namespace BloodMoon
 
         private void OnLogMessage(string condition, string stackTrace, LogType type)
         {
-            if (condition.StartsWith("[BloodMoon]")) return; // Avoid infinite recursion if our logger uses Debug.Log
+            if (condition.StartsWith("[BloodMoon]")) return; // 如果我们的日志记录器使用Debug.Log，避免无限递归
 
-            // Handle both Error/Exception types and Log messages that start with "Error: "
+            // 处理Error/Exception类型和以"Error: "开头的Log消息
             bool isError = type == LogType.Exception || type == LogType.Error;
             bool isErrorLog = type == LogType.Log && condition.StartsWith("Error: ");
             
             if (isError || isErrorLog)
             {
-                // Enhanced error categorization and logging
+                // 增强的错误分类和日志记录
                 string errorCategory = "Unknown";
                 string detailedMessage = condition;
                 
-                // Categorize errors for better debugging
+                // 为更好的调试对错误进行分类
                 if (condition.Contains("Index was out of range") || condition.Contains("ArgumentOutOfRangeException"))
                 {
                     errorCategory = "IndexOutOfRange";
@@ -112,30 +112,30 @@ namespace BloodMoon
                     errorCategory = "Memory";
                 }
                 
-                // Log with category and stack trace
+                // 使用类别和堆栈跟踪记录日志
                 BloodMoon.Utils.Logger.Error($"[{errorCategory}] {detailedMessage}\nStack Trace:\n{stackTrace}");
                 
-                // Additional handling for critical errors
+                // 对关键错误的额外处理
                 if (errorCategory == "IndexOutOfRange" || errorCategory == "NullReference")
                 {
-                    // These are critical errors that need immediate attention
+                    // 这些是需要立即关注的关键错误
                     BloodMoon.Utils.Logger.Error($"CRITICAL: {errorCategory} error detected. This may cause game instability.");
                     
-                    // Try to log additional context if available
+                    // 尝试记录可用的额外上下文
                     try
                     {
-                        // Log current game state for debugging
+                        // 记录当前游戏状态用于调试
                         if (LevelManager.Instance != null)
                         {
-                            // Note: LevelManager may not have CurrentLevelName property in this version
-                            // We'll use available properties
+                            // 注意：此版本中LevelManager可能没有CurrentLevelName属性
+                            // 我们将使用可用的属性
                             BloodMoon.Utils.Logger.Error($"Game State: IsBaseLevel={LevelManager.Instance.IsBaseLevel}, IsRaidMap={LevelManager.Instance.IsRaidMap}");
                         }
                         
-                        // Log BloodMoon state
+                        // 记录BloodMoon状态
                         if (_event != null)
                         {
-                            // Note: BossManager may not have GetBossCount method in this version
+                            // 注意：此版本中BossManager可能没有GetBossCount方法
                             BloodMoon.Utils.Logger.Error($"BloodMoon State: Active={_event.IsActive(GameClock.Now)}");
                         }
                     }
@@ -147,7 +147,7 @@ namespace BloodMoon
             }
             else if (type == LogType.Warning)
             {
-                // Log warnings for monitoring
+                // 记录警告用于监控
                 if (condition.Contains("BloodMoon") || condition.Contains("AI") || condition.Contains("Weapon"))
                 {
                     BloodMoon.Utils.Logger.Warning($"Game Warning: {condition}");
@@ -188,9 +188,9 @@ namespace BloodMoon
             UniTask.Void(async () =>
             {
                 await UniTask.WaitUntil(() => LevelManager.LevelInited);
-                if (this == null || _ui == null) return; // Safety check after await
+                if (this == null || _ui == null) return; // await 之后的安全检查
                 
-                // Retry attaching UI for a few seconds as TimeOfDayDisplay might be late
+                // 重试附加UI几秒钟，因为TimeOfDayDisplay可能延迟
                 float timeout = 5.0f;
                 while (timeout > 0f)
                 {
@@ -210,12 +210,12 @@ namespace BloodMoon
         private void OnLevelInitialized()
         {
 
-            // Reload config on every level start to support hot-swapping values
+            // 在每个层级启动时重新加载配置，以支持热交换值
             // BloodMoon.Utils.ModConfig.Load();
 
             _ui.TryAttachToTimeOfDayDisplay();
             
-            // Safety check for base level
+            // 基础级别安全检查
             if (LevelManager.Instance != null && LevelManager.Instance.IsBaseLevel) return;
 
             var now = GameClock.Now;
@@ -232,23 +232,23 @@ namespace BloodMoon
             var now = GameClock.Now;
             bool active = _event.IsActive(now);
 
-            // Throttle UI updates to 2Hz (every 0.5s) to save performance
+            // 限制UI更新为2Hz（每0.5秒）以节省性能
             _uiRefreshTimer += Time.deltaTime;
             if (_uiRefreshTimer > 0.5f)
             {
                 _uiRefreshTimer = 0f;
                 _ui.Refresh(now);
-                _dataStore.UpdateCache(); // Update global AI cache
+                _dataStore.UpdateCache(); // 更新全局AI缓存
             }
             
-            // Logic Safety: Check if LevelManager is valid first
+            // 逻辑安全：首先检查LevelManager是否有效
             if (LevelManager.Instance == null) 
             {
                 _overlay.Hide();
                 return;
             }
             
-            // Disable Boss logic in Base Level, but keep UI updating
+            // 在基地关卡禁用Boss逻辑，但保持UI更新
             if (LevelManager.Instance.IsBaseLevel)
             {
                 _overlay.Hide();
@@ -268,7 +268,7 @@ namespace BloodMoon
 
         private void LateUpdate()
         {
-            // Process atmosphere visual overrides after game logic
+            // 在游戏逻辑后处理大气视觉效果覆盖
             _overlay?.Tick(Time.deltaTime);
         }
     }
