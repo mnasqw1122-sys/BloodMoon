@@ -244,10 +244,15 @@ namespace BloodMoon
                  var offset = UnityEngine.Random.insideUnitCircle * UnityEngine.Random.Range(3f, 8f);
                  spawnPos = bossPos + new Vector3(offset.x, 0, offset.y);
                  
-                 // 基本地面检查以确保安全
-                 if (UnityEngine.AI.NavMesh.SamplePosition(spawnPos, out var hit, 10f, UnityEngine.AI.NavMesh.AllAreas))
+                 // 使用A* Pathfinding Project寻找最近的有效节点
+                 if (AstarPath.active != null)
                  {
-                     spawnPos = hit.position;
+                     var nn = Pathfinding.NNConstraint.Walkable;
+                     var node = AstarPath.active.GetNearest(spawnPos, nn).node;
+                     if (node != null && node.Walkable)
+                     {
+                         spawnPos = (Vector3)node.position;
+                     }
                  }
                  else if (Physics.Raycast(spawnPos + Vector3.up * 5f, Vector3.down, out var groundHit, 10f, GameplayDataSettings.Layers.groundLayerMask))
                  {
@@ -264,6 +269,18 @@ namespace BloodMoon
                          await UniTask.Delay(500); 
                          
                          if (clone == null) continue;
+                         
+                         // 检查是否是宠物或NPC，如果是则跳过
+                         if (IsPetOrNPC(clone))
+                         {
+                             BloodMoon.Utils.Logger.Warning($"[BossManager] Skipping pet/NPC minion: {clone.name}");
+                             // 销毁这个角色
+                             if (clone != null && clone.gameObject != null)
+                             {
+                                 UnityEngine.Object.Destroy(clone.gameObject);
+                             }
+                             continue;
+                         }
                          
                          var anim = clone.GetComponent<Animator>();
                          if (anim != null && !anim.isInitialized) await UniTask.Delay(200);
@@ -540,10 +557,13 @@ namespace BloodMoon
 
         private void EnableRevenge(CharacterMainControl c, CharacterMainControl? player)
         {
-            if (player == null) return;
+            if (player == null || c == null) return;
+            
+            // 安全检查
+            if (player.mainDamageReceiver == null) return;
 
             var ai = c.GetComponent<AICharacterController>();
-            if (ai != null)
+            if (ai != null && player.mainDamageReceiver.transform != null)
             {
                 ai.SetTarget(player.mainDamageReceiver.transform);
                 ai.forceTracePlayerDistance = 100f;
@@ -559,7 +579,15 @@ namespace BloodMoon
             // 随机嘲讽
             string[] taunts = { "Boss_Revenge", "Boss_Taunt_1", "Boss_Taunt_2", "Boss_Taunt_3" };
             string key = taunts[UnityEngine.Random.Range(0, taunts.Length)];
-            c.PopText(Localization.Get(key));
+            
+            try
+            {
+                c.PopText(Localization.Get(key));
+            }
+            catch (System.Exception ex)
+            {
+                BloodMoon.Utils.Logger.Warning($"[BossManager] Failed to show taunt text: {ex.Message}");
+            }
         }
 
 
@@ -872,16 +900,11 @@ namespace BloodMoon
 
                     CharacterRandomPreset[] selected = System.Array.Empty<CharacterRandomPreset>();
 
-                    await Task.Run(() =>
-                    {
-                        var rnd = new System.Random();
-                        int bossCount = ModConfig.Instance.BossCount;
-                        bossCount = Mathf.Clamp(bossCount, 1, 5); // 限制在1到5个Boss之间
-                        selected = allBossPresets.OrderBy(_ => rnd.Next()).Take(bossCount).ToArray();
-                    });
-
-                    // 强制返回主线程以确保Unity API安全
-                    await UniTask.SwitchToMainThread();
+                    // 在主线程上直接选择，避免后台线程访问Unity对象的潜在风险
+                    var rnd = new System.Random();
+                    int bossCount = ModConfig.Instance.BossCount;
+                    bossCount = Mathf.Clamp(bossCount, 1, 5); // 限制在1到5个Boss之间
+                    selected = allBossPresets.OrderBy(_ => rnd.Next()).Take(bossCount).ToArray();
 
                     _selectedBossPresets.Clear();
                     _selectedBossPresets.AddRange(selected);
@@ -946,6 +969,18 @@ namespace BloodMoon
                                     
                                     if (clone == null) continue; 
                                     
+                                    // 检查是否是宠物或NPC，如果是则跳过
+                                    if (IsPetOrNPC(clone))
+                                    {
+                                        BloodMoon.Utils.Logger.Warning($"[BossManager] Skipping pet/NPC character: {clone.name}");
+                                        // 销毁这个角色
+                                        if (clone != null && clone.gameObject != null)
+                                        {
+                                            UnityEngine.Object.Destroy(clone.gameObject);
+                                        }
+                                        continue;
+                                    }
+                                    
                                     var anim = clone.GetComponent<Animator>();
                                     if (anim == null || !anim.isInitialized)
                                     {
@@ -979,6 +1014,127 @@ namespace BloodMoon
                     _setupRunning = false;
                 }
             });
+        }
+        
+        /// <summary>
+        /// 检查角色是否是宠物或NPC
+        /// </summary>
+        private bool IsPetOrNPC(CharacterMainControl character)
+        {
+            if (character == null) return false;
+            
+            try
+            {
+                // 调试：记录检查开始
+                if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                {
+                    BloodMoon.Utils.Logger.Debug($"[BossManager] Checking if character {character.name} is pet/NPC");
+                }
+                
+                // 检查角色预设
+                var preset = character.characterPreset;
+                if (preset != null)
+                {
+                    // 获取角色图标
+                    var icon = preset.GetCharacterIcon();
+                    if (icon != null)
+                    {
+                        // 检查是否是宠物图标
+                        var petIcon = GameplayDataSettings.UIStyle.PetCharacterIcon;
+                        if (petIcon != null && icon == petIcon)
+                        {
+                            BloodMoon.Utils.Logger.Warning($"[BossManager] Character {character.name} is a pet (pet icon detected)");
+                            return true;
+                        }
+                        
+                        // 检查是否是商人图标
+                        var merchantIcon = GameplayDataSettings.UIStyle.MerchantCharacterIcon;
+                        if (merchantIcon != null && icon == merchantIcon)
+                        {
+                            BloodMoon.Utils.Logger.Warning($"[BossManager] Character {character.name} is a merchant (merchant icon detected)");
+                            return true;
+                        }
+                        
+                        // 调试：记录图标检查结果
+                        if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                        {
+                            BloodMoon.Utils.Logger.Debug($"[BossManager] Character {character.name} icon check passed (not pet/merchant)");
+                        }
+                    }
+                    else
+                    {
+                        // 调试：没有图标
+                        if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                        {
+                            BloodMoon.Utils.Logger.Debug($"[BossManager] Character {character.name} has no icon");
+                        }
+                    }
+                }
+                else
+                {
+                    // 调试：没有预设
+                    if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                    {
+                        BloodMoon.Utils.Logger.Debug($"[BossManager] Character {character.name} has no characterPreset");
+                    }
+                }
+                
+                // 检查角色名称（备用方法）
+                string characterName = character.name.ToLower();
+                string[] petKeywords = { "pet", "dog", "cat", "animal", "companion" };
+                string[] npcKeywords = { "npc", "merchant", "trader", "quest", "civilian" };
+                
+                foreach (var keyword in petKeywords)
+                {
+                    if (characterName.Contains(keyword))
+                    {
+                        BloodMoon.Utils.Logger.Warning($"[BossManager] Character {character.name} is likely a pet (name contains '{keyword}')");
+                        return true;
+                    }
+                }
+                
+                foreach (var keyword in npcKeywords)
+                {
+                    if (characterName.Contains(keyword))
+                    {
+                        BloodMoon.Utils.Logger.Warning($"[BossManager] Character {character.name} is likely an NPC (name contains '{keyword}')");
+                        return true;
+                    }
+                }
+                
+                // 调试：名称检查通过
+                if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                {
+                    BloodMoon.Utils.Logger.Debug($"[BossManager] Character {character.name} name check passed (no pet/NPC keywords)");
+                }
+                
+                // 检查是否有PetAI组件
+                var petAI = character.GetComponent<PetAI>();
+                if (petAI != null)
+                {
+                    BloodMoon.Utils.Logger.Warning($"[BossManager] Character {character.name} has PetAI component");
+                    return true;
+                }
+                
+                // 调试：组件检查通过
+                if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                {
+                    BloodMoon.Utils.Logger.Debug($"[BossManager] Character {character.name} component check passed (no PetAI)");
+                }
+                
+                // 所有检查通过，不是宠物或NPC
+                if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                {
+                    BloodMoon.Utils.Logger.Debug($"[BossManager] Character {character.name} is NOT a pet/NPC - allowing generation");
+                }
+                
+                return false;
+            }
+            catch (System.Exception ex)
+            {
+                BloodMoon.Utils.Logger.Error($"[BossManager] Error checking if character is pet/NPC: {ex.Message}");
+                return false;
+            }
         }
 
     }

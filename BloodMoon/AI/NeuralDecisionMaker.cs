@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 using BloodMoon.Utils;
@@ -54,7 +55,7 @@ namespace BloodMoon.AI
                     string json = File.ReadAllText(_brainPath);
                     _network = NeuralNetwork.LoadFromString(json);
                     // 检查拓扑匹配
-                    if (_network == null || _network.Layers == null || _network.Layers.Length < 1 || _network.Layers[0] != INPUT_SIZE)
+                    if (_network == null || _network.Layers == null || _network.Layers.Length < 3 || _network.Layers[0] != INPUT_SIZE || _network.Layers[_network.Layers.Length - 1] != actionNames.Count)
                     {
                         // 结构不匹配或加载失败，请重置
                         CreateNewNetwork();
@@ -102,21 +103,21 @@ namespace BloodMoon.AI
             float[] outputs = _network.FeedForward(inputs);
 
             var scores = new Dictionary<string, float>();
-            for (int i = 0; i < outputs.Length; i++)
+            
+            // 确保只访问有效的数组元素，避免索引越界
+            int minLength = Math.Min(outputs.Length, _actionNames.Count);
+            for (int i = 0; i < minLength; i++)
             {
-                if (i < _actionNames.Count)
+                string action = _actionNames[i];
+                float baseScore = outputs[i];
+                
+                // 应用静态权重
+                if (_actionWeights.TryGetValue(action, out float w))
                 {
-                    string action = _actionNames[i];
-                    float baseScore = outputs[i];
-                    
-                    // 应用静态权重
-                    if (_actionWeights.TryGetValue(action, out float w))
-                    {
-                        baseScore *= w;
-                    }
-                    
-                    scores[action] = baseScore;
+                    baseScore *= w;
                 }
+                
+                scores[action] = baseScore;
             }
             
             ApplyContextAdjustment(scores, ctx);

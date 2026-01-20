@@ -48,7 +48,10 @@ namespace BloodMoon
             bool active = _event.IsActive(now);
             var remain = active ? _event.GetOverETA(now) : eta;
             var label = active ? Localization.Get("Event_Active") : Localization.Get("Event_Incoming");
-            var timeStr = $"{Mathf.FloorToInt((float)remain.TotalHours):000}:{remain.Minutes:00}";
+            
+            // 确保时间不为负数
+            if (remain.TotalHours < 0) remain = TimeSpan.Zero;
+            var timeStr = $"{Mathf.Max(0, Mathf.FloorToInt((float)remain.TotalHours)):000}:{Mathf.Abs(remain.Minutes):00}";
             
             // 1. 文本内容
             string difficultyStr = "";

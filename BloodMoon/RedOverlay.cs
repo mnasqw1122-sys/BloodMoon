@@ -101,7 +101,7 @@ namespace BloodMoon
             RenderSettings.fogMode = FogMode.ExponentialSquared; 
 
             // "呼吸"大气效果的脉冲效果
-            float pulse = Mathf.Sin(Time.time * 0.8f) * 0.2f + 1.0f; // 0.8 到 1.2，更慢更深
+            float pulse = Mathf.Sin(Time.unscaledTime * 0.8f) * 0.2f + 1.0f; // 0.8 到 1.2，更慢更深
             
             float t = _transitionProgress;
             

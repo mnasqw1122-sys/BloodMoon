@@ -73,41 +73,64 @@ namespace BloodMoon.AI
 
         public float[] FeedForward(float[] inputs)
         {
-            // 设置输入层
-            for (int i = 0; i < inputs.Length; i++)
+            // 安全地设置输入层，确保不会越界
+            int inputCount = Math.Min(inputs.Length, Neurons[0].Length);
+            for (int i = 0; i < inputCount; i++)
             {
                 Neurons[0][i] = inputs[i];
             }
+            // 对于超出输入层大小的输入，忽略它们
 
-            // 信息
+            // 信息传播
             for (int i = 0; i < Layers.Length - 1; i++)
             {
                 int currentLayerIdx = i;
                 int nextLayerIdx = i + 1;
+
+                // 确保权重和偏置数组已正确初始化
+                if (Weights == null || Weights[nextLayerIdx] == null || Biases == null || Biases[nextLayerIdx] == null)
+                {
+                    continue;
+                }
 
                 // 对于下一层中的每个神经元
                 for (int nextNode = 0; nextNode < Layers[nextLayerIdx]; nextNode++)
                 {
                     float value = 0f;
 
+                    // 确保当前神经元的权重数组已初始化
+                    if (Weights[nextLayerIdx][nextNode] == null)
+                    {
+                        continue;
+                    }
+
                     // 对当前层的输入进行加权求和
-                    // Weights[nextLayerIdx][nextNode] 包含来自当前层（currentLayerIdx）的输入权重
                     for (int currentNode = 0; currentNode < Layers[currentLayerIdx]; currentNode++)
                     {
-                        value += Neurons[currentLayerIdx][currentNode] * Weights[nextLayerIdx][nextNode][currentNode];
+                        // 确保权重索引有效
+                        if (currentNode < Weights[nextLayerIdx][nextNode].Length)
+                        {
+                            value += Neurons[currentLayerIdx][currentNode] * Weights[nextLayerIdx][nextNode][currentNode];
+                        }
                     }
 
                     // 添加偏见
-                    value += Biases[nextLayerIdx][nextNode];
+                    if (nextNode < Biases[nextLayerIdx].Length)
+                    {
+                        value += Biases[nextLayerIdx][nextNode];
+                    }
 
                     // 激活
-                    if (nextLayerIdx == Layers.Length - 1)
+                    if (nextNode < Neurons[nextLayerIdx].Length)
                     {
-                        Neurons[nextLayerIdx][nextNode] = Sigmoid(value);
-                    }
-                    else
-                    {
-                        Neurons[nextLayerIdx][nextNode] = (float)Math.Tanh(value);
+                        if (nextLayerIdx == Layers.Length - 1)
+                        {
+                            Neurons[nextLayerIdx][nextNode] = Sigmoid(value);
+                        }
+                        else
+                        {
+                            Neurons[nextLayerIdx][nextNode] = (float)Math.Tanh(value);
+                        }
                     }
                 }
             }

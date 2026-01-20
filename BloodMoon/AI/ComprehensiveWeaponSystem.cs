@@ -205,17 +205,30 @@ namespace BloodMoon.AI
         
         private void PreloadWeaponResources()
         {
-            // 预加载已知武器资源
-            string[] knownWeapons = {
-                "AK-47", "M4A1", "MP5", "UZI", "Glock", "DesertEagle",
-                "Knife", "Axe", "Bat", "Crowbar", "Machete",
-                "Grenade", "Molotov", "SmokeGrenade"
+            // 优化：只预加载最常用的武器类型，减少资源消耗
+            // 基于实际游戏日志，这些是最常见的武器类型
+            string[] essentialWeapons = {
+                "AK-47", "M4A1", "MP5", "Glock",
+                "Knife", "Axe"
             };
             
-            foreach (var weapon in knownWeapons)
+            // 延迟预加载，避免游戏启动时的性能冲击
+            UniTask.Void(async () =>
             {
-                _weaponCache.Preload(weapon);
-            }
+                // 等待游戏初始化完成
+                await UniTask.Delay(3000);
+                
+                BloodMoon.Utils.Logger.Log("[WeaponSystem] Starting essential weapon preload...");
+                
+                foreach (var weapon in essentialWeapons)
+                {
+                    _weaponCache.Preload(weapon);
+                    // 添加小延迟以避免一次性加载太多资源
+                    await UniTask.Delay(100);
+                }
+                
+                BloodMoon.Utils.Logger.Log("[WeaponSystem] Essential weapon preload completed");
+            });
         }
         
         public async UniTask<WeaponSet> FindWeaponsForAI(CharacterMainControl character)

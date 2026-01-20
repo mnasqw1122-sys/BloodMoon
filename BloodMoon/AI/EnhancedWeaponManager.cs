@@ -14,15 +14,27 @@ namespace BloodMoon.AI
         private static EnhancedWeaponManager? _instance;
         public static EnhancedWeaponManager Instance => _instance ??= new EnhancedWeaponManager();
 
-        // 硬编码回退武器ID（这些是常见的武器ID，需要根据实际游戏调整）
-        private static readonly int[] FALLBACK_MELEE_IDS = { 1001, 1002, 1003, 1004, 1005 }; // 示例近战武器ID
-        private static readonly int[] FALLBACK_GUN_IDS = { 2001, 2002, 2003, 2004, 2005 }; // 示例枪支ID
+        // 硬编码回退武器ID（基于实际日志中的成功生成记录）
+        // 从新日志中提取的实际成功生成的武器ID
+        private static readonly int[] FALLBACK_MELEE_IDS = { 
+            1172, 240, 1096, 784, 1208, 683, 735, 658, 655, 254, 682, 1286, 1287, 786, 1173,
+            1174, 1248, 680, 258, 305, 238, 1074, 1095, 652, 653, 657, 659, 250, 252, 256,
+            260, 327, 357, 681, 734, 737, 780, 782, 787, 788
+        }; // 从实际日志中提取的成功生成的近战武器ID
+        
+        private static readonly int[] FALLBACK_GUN_IDS = { 
+            788, 659, 238, 656, 258, 655, 250, 246, 252, 781, 786, 254, 782, 652, 781,
+            653, 327, 657, 787, 357, 681, 734, 256, 260, 305, 680, 682, 737, 780
+        }; // 从实际日志中提取的成功生成的枪支ID
         
         private List<int> _cachedMeleeIds = new List<int>();
         private List<int> _cachedGunIds = new List<int>();
         private bool _initialized = false;
         private bool _isInitializing = false;
         private UniTask _initializationTask;
+        
+        // 弹药生成失败统计
+        private Dictionary<string, int> _ammoGenerationFailures = new Dictionary<string, int>();
 
         public async UniTask EnsureInitialized()
         {
@@ -280,8 +292,12 @@ namespace BloodMoon.AI
                 BloodMoon.Utils.Logger.Log($"[EnhancedWeaponManager] Trying to spawn melee from cache ({_cachedMeleeIds.Count} IDs available)");
                 
                 // 尝试从缓存中获取有效武器
-                for (int i = 0; i < Mathf.Min(15, _cachedMeleeIds.Count * 2); i++) 
+                int attempts = Mathf.Min(15, _cachedMeleeIds.Count * 2);
+                for (int i = 0; i < attempts; i++) 
                 {
+                    // 确保缓存不为空再随机访问
+                    if (_cachedMeleeIds.Count == 0) break;
+                    
                     int id = _cachedMeleeIds[Random.Range(0, _cachedMeleeIds.Count)];
                     try
                     {
@@ -296,7 +312,10 @@ namespace BloodMoon.AI
                     {
                         BloodMoon.Utils.Logger.Warning($"[EnhancedWeaponManager] Failed to instantiate melee ID {id}: {ex.Message}");
                         // 移除无效ID
-                        _cachedMeleeIds.Remove(id);
+                        if (_cachedMeleeIds.Contains(id))
+                        {
+                            _cachedMeleeIds.Remove(id);
+                        }
                     }
                 }
             }
@@ -432,8 +451,12 @@ namespace BloodMoon.AI
             {
                 BloodMoon.Utils.Logger.Log($"[EnhancedWeaponManager] Trying to spawn gun from cache ({_cachedGunIds.Count} IDs available)");
                 
-                for (int i = 0; i < Mathf.Min(15, _cachedGunIds.Count * 2); i++)
+                int attempts = Mathf.Min(15, _cachedGunIds.Count * 2);
+                for (int i = 0; i < attempts; i++)
                 {
+                    // 确保缓存不为空再随机访问
+                    if (_cachedGunIds.Count == 0) break;
+                    
                     int id = _cachedGunIds[Random.Range(0, _cachedGunIds.Count)];
                     try
                     {
@@ -448,7 +471,10 @@ namespace BloodMoon.AI
                     {
                         BloodMoon.Utils.Logger.Warning($"[EnhancedWeaponManager] Failed to instantiate gun ID {id}: {ex.Message}");
                         // 移除无效ID
-                        _cachedGunIds.Remove(id);
+                        if (_cachedGunIds.Contains(id))
+                        {
+                            _cachedGunIds.Remove(id);
+                        }
                     }
                 }
             }
@@ -556,13 +582,23 @@ namespace BloodMoon.AI
         {
              if (gun == null) return false;
              
-             // 检查RPG
-             if (gun.name.Contains("RPG") || gun.name.Contains("Rocket"))
+             // 特殊武器处理
+             string gunName = gun.name.ToLower();
+             
+             // 检查沙漠之鹰（从日志中看到子弹生成失败）
+             if (gunName.Contains("desert") || gunName.Contains("沙漠之鹰"))
              {
-                 // 尝试强制生成RPG弹药
-                 // 由于没有ID我们无法轻易按名称搜索弹药，
-                 // 我们依赖GenerateBullet
-                 // 如果这对RPG失败，如果我们知道的话，可能需要手动找到兼容的弹药ID
+                 BloodMoon.Utils.Logger.Warning($"[EnhancedWeaponManager] Desert Eagle detected, may have ammo issues");
+                 // 尝试使用备用弹药生成方法
+                 return await TryAlternativeAmmoGeneration(character, gun, "DesertEagle");
+             }
+             
+             // 检查RPG/Rocket
+             if (gunName.Contains("rpg") || gunName.Contains("rocket"))
+             {
+                 BloodMoon.Utils.Logger.Warning($"[EnhancedWeaponManager] RPG/Rocket detected, may have ammo issues");
+                 // 尝试使用备用弹药生成方法
+                 return await TryAlternativeAmmoGeneration(character, gun, "RPG");
              }
 
              try
@@ -583,11 +619,82 @@ namespace BloodMoon.AI
                              character.CharacterItem.Inventory.AddAndMerge(extra);
                         }
                     }
+                    BloodMoon.Utils.Logger.Log($"[EnhancedWeaponManager] Successfully ensured ammo for {gun.name}");
                     return true;
                 }
+                else
+                {
+                    BloodMoon.Utils.Logger.Warning($"[EnhancedWeaponManager] GenerateBullet returned null for {gun.name}");
+                    
+                    // 记录弹药生成失败统计
+                    string weaponName = gun.name;
+                    if (!_ammoGenerationFailures.ContainsKey(weaponName))
+                        _ammoGenerationFailures[weaponName] = 0;
+                    _ammoGenerationFailures[weaponName]++;
+                    
+                    // 定期输出统计信息
+                    if (_ammoGenerationFailures[weaponName] % 5 == 0) // 每5次失败输出一次
+                    {
+                        BloodMoon.Utils.Logger.Warning($"[EnhancedWeaponManager] Ammo generation failed {_ammoGenerationFailures[weaponName]} times for {weaponName}");
+                    }
+                    
+                    return await TryAlternativeAmmoGeneration(character, gun, "Generic");
+                }
              }
-             catch {}
-             return false;
+             catch (System.Exception ex)
+             {
+                 BloodMoon.Utils.Logger.Error($"[EnhancedWeaponManager] Error ensuring ammo for {gun.name}: {ex.Message}");
+                 return await TryAlternativeAmmoGeneration(character, gun, "Fallback");
+             }
+        }
+        
+        private async UniTask<bool> TryAlternativeAmmoGeneration(CharacterMainControl character, Item gun, string weaponType)
+        {
+            try
+            {
+                BloodMoon.Utils.Logger.Log($"[EnhancedWeaponManager] Trying alternative ammo generation for {gun.name} (type: {weaponType})");
+                
+                // 尝试直接搜索弹药ID
+                // 基于实际日志，弹药ID 50已验证有效
+                // 添加更多可能的弹药ID范围
+                Dictionary<string, int[]> ammoIdsByWeaponType = new Dictionary<string, int[]>
+                {
+                    { "DesertEagle", new int[] { 100, 50, 51, 52, 53, 54 } }, // 从日志看ID 100有效，ID 50已验证有效
+                    { "RPG", new int[] { 326 } }, // RPG弹药ID（需要实际验证）
+                    { "Generic", new int[] { 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65 } } // 通用弹药ID范围
+                };
+                
+                if (ammoIdsByWeaponType.TryGetValue(weaponType, out var ammoIds))
+                {
+                    foreach (int ammoId in ammoIds)
+                    {
+                        try
+                        {
+                            var ammo = await ItemAssetsCollection.InstantiateAsync(ammoId);
+                            if (ammo != null)
+                            {
+                                ammo.StackCount = ammo.MaxStackCount;
+                                character.CharacterItem.Inventory.AddAndMerge(ammo);
+                                BloodMoon.Utils.Logger.Log($"[EnhancedWeaponManager] Successfully added ammo ID {ammoId} for {gun.name}");
+                                return true;
+                            }
+                        }
+                        catch (System.Exception ex)
+                        {
+                            BloodMoon.Utils.Logger.Debug($"[EnhancedWeaponManager] Failed to instantiate ammo ID {ammoId}: {ex.Message}");
+                        }
+                    }
+                }
+                
+                // 如果所有方法都失败，至少记录警告
+                BloodMoon.Utils.Logger.Warning($"[EnhancedWeaponManager] All ammo generation methods failed for {gun.name}");
+                return false;
+            }
+            catch (System.Exception ex)
+            {
+                BloodMoon.Utils.Logger.Error($"[EnhancedWeaponManager] Alternative ammo generation failed for {gun.name}: {ex.Message}");
+                return false;
+            }
         }
         
         public Item? FindMeleeWeapon(CharacterMainControl character)

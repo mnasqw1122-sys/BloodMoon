@@ -57,6 +57,8 @@ namespace BloodMoon
         private float _aliveTime;
         private Vector3 _prevPos;
         private float _stuckTimer;
+        private float _lastPathRequestTime; // 上次路径请求时间
+        private const float MIN_PATH_REQUEST_INTERVAL = 0.5f; // 最小路径请求间隔（秒）
         
         // --- 战斗状态 ---
         private float _shootTimer;
@@ -321,17 +323,18 @@ namespace BloodMoon
                         if (_currentAction != null) 
                         {
                             _currentAction.OnExit(_context);
-                            // 为OLD操作设置冷却时间，以防止我们立即切换回该操作
-                            _actionSwitchCooldowns[_currentAction.Name] = 2.0f;
+                            // 为OLD操作设置冷却时间，以防止我们立即切换回该操作（从2.0f增加到3.0f）
+                            _actionSwitchCooldowns[_currentAction.Name] = 3.0f;
                         }
                         
-                        // 设置全局冷却时间
-                        _globalCooldown = 0.5f;
+                        // 设置全局冷却时间（从0.5f增加到1.0f以减少频繁切换）
+                        _globalCooldown = 1.0f;
 
                         // 操作切换调试日志
-                        #if DEBUG
-                        BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Switch Action: {_currentAction?.Name ?? "None"} -> {stableAction.Name}");
-                        #endif
+                        if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                        {
+                            BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Switch Action: {_currentAction?.Name ?? "None"} -> {stableAction.Name}");
+                        }
 
                         _currentAction = stableAction;
                         _currentAction.OnEnter(_context);
@@ -1148,9 +1151,14 @@ namespace BloodMoon
             float distToTarget = Vector3.Distance(_c.transform.position, targetPos);
             
             // 分层距离逻辑用于性能优化
-            if (distToTarget > 150f) // 非常远——采用简单运动
+            if (distToTarget > 100f) // 非常远——采用简单运动（从150f降低到100f）
             {
                 // 目标距离非常远，采用无需路径规划的简单移动方式
+                // 记录日志以便调试
+                if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                {
+                    BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Target too far ({distToTarget:F1}m), using direct movement");
+                }
                 return (targetPos - _c.transform.position).normalized;
             }
             else if (distToTarget < 3f) // 非常接近——无需路径规划
@@ -1166,49 +1174,69 @@ namespace BloodMoon
             if (_path == null || _path.vectorPath == null || _path.vectorPath.Count == 0 || _path.error)
             {
                 shouldRepath = true;
-                BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Path invalid, requesting repath");
+                if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                {
+                    BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Path invalid, requesting repath");
+                }
             }
             else if (_repathTimer <= 0f)
             {
                 // 仅在目标发生显著移动时重新定位
                 float targetMoveDist = Vector3.Distance(_lastPathTarget, targetPos);
-                if (targetMoveDist > 5f) // 从3f增加以减少不必要的重新路径
+                if (targetMoveDist > 10f) // 从5f增加到10f以减少不必要的重新路径
                 {
                     shouldRepath = true;
-                    BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Target moved {targetMoveDist:F1}m, requesting repath");
+                    if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                    {
+                        BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Target moved {targetMoveDist:F1}m, requesting repath");
+                    }
                 }
                 else
                 {
                     // 延长重路径计时器，因为目标移动不大
-                    _repathTimer = 1.0f;
+                    _repathTimer = 2.0f; // 从1.0f增加到2.0f
                 }
             }
             // 简化路径有效性检查，具有较大容差
-            else if (_path.vectorPath.Count > 0 && Vector3.Distance(_c.transform.position, _path.vectorPath[0]) > 20f) // 从15f增加
+            else if (_path.vectorPath.Count > 0 && Vector3.Distance(_c.transform.position, _path.vectorPath[0]) > 30f) // 从20f增加到30f
             {
                 shouldRepath = true;
-                BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Far from path start ({Vector3.Distance(_c.transform.position, _path.vectorPath[0]):F1}m), requesting repath");
+                if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                {
+                    BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Far from path start ({Vector3.Distance(_c.transform.position, _path.vectorPath[0]):F1}m), requesting repath");
+                }
             }
 
             if (shouldRepath && !_waitingForPath)
             {
-                // 性能优化：若已有过多AI正在进行路径寻找，则跳过路径寻找
-                if (BloodMoon.AI.RuntimeMonitor.Instance != null && 
-                    BloodMoon.AI.RuntimeMonitor.Instance.ConcurrentPathfindingCount > 5)
+                // 路径查找频率限制：检查是否距离上次路径请求时间太短
+                float timeSinceLastPath = Time.time - _lastPathRequestTime;
+                if (timeSinceLastPath < MIN_PATH_REQUEST_INTERVAL)
                 {
-                    BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Too many concurrent pathfinding ({BloodMoon.AI.RuntimeMonitor.Instance.ConcurrentPathfindingCount}), using fallback");
+                    // 路径请求太频繁，使用回退移动
+                    if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                    {
+                        BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Path request too frequent ({timeSinceLastPath:F2}s < {MIN_PATH_REQUEST_INTERVAL:F2}s), using fallback");
+                    }
                     return (targetPos - _c.transform.position).normalized;
                 }
+                
+                // 性能优化：简单的并发路径查找限制
+                // 移除RuntimeMonitor依赖，使用简化版本
+                // 可以在这里添加简单的并发控制逻辑，如果需要的话
                 
                 _lastPathTarget = targetPos;
                 _repathTimer = 3.0f; // 从2.0f增加以进一步降低路径查找负载
                 _waitingForPath = true;
+                _lastPathRequestTime = Time.time; // 记录本次路径请求时间
                 
-                // 以性能监控启动路径规划
-                BloodMoon.AI.RuntimeMonitor.Instance?.IncrementPathfindingCount();
+                // 启动路径规划
                 _seeker.StartPath(_c.transform.position, targetPos, OnPathComplete);
                 
-                BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Starting path to target {distToTarget:F1}m away");
+                if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                {
+                    BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Starting path to target {distToTarget:F1}m away");
+                }
             }
 
             if (_path == null || _path.vectorPath == null || _path.vectorPath.Count == 0 || _path.error)
@@ -1371,9 +1399,6 @@ namespace BloodMoon
 
         private void OnPathComplete(Path p)
         {
-            // 递减并发路径查找计数
-            BloodMoon.AI.RuntimeMonitor.Instance?.DecrementPathfindingCount();
-            
             if (!p.error)
             {
                 _path = p;
@@ -1383,6 +1408,24 @@ namespace BloodMoon
             else
             {
                 BloodMoon.Utils.Logger.Warning($"[AI {_c.name}] Path failed: {p.errorLog}");
+                
+                // 路径查找失败的回退机制
+                // 如果错误是"Couldn't find a node close to the end point"，尝试使用备用目标位置
+                if (p.errorLog.Contains("Couldn't find a node close to the end point"))
+                {
+                    // 记录失败的目标位置
+                    if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                    {
+                        BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Pathfinding failed for distant target, using fallback movement");
+                    }
+                    
+                    // 清除当前路径，强制使用直接移动
+                    _path = null;
+                    _currentWaypoint = 0;
+                    
+                    // 设置一个较长的重试延迟
+                    _repathTimer = 5.0f;
+                }
             }
             _waitingForPath = false;
         }

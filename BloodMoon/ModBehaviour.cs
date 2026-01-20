@@ -49,12 +49,17 @@ namespace BloodMoon
             _squadManager.Initialize();
             
             // 提前初始化武器管理器缓存（异步）
-            UniTask.Void(async () =>
-            {
+            UniTask.Void(async ()=> {
                 try
                 {
                     await BloodMoon.AI.EnhancedWeaponManager.Instance.EnsureInitialized();
                     BloodMoon.Utils.Logger.Log("[ModBehaviour] Weapon Manager initialized successfully");
+                    
+                    // 记录找到的武器数量用于调试
+                    if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                    {
+                        BloodMoon.Utils.Logger.Log($"[ModBehaviour] Weapon cache initialized");
+                    }
                 }
                 catch (System.Exception ex)
                 {
@@ -258,7 +263,6 @@ namespace BloodMoon
                 _overlay.Show();
                 _bossManager.Tick();
                 _squadManager.Update();
-                BloodMoon.AI.RuntimeMonitor.Instance.Update();
             }
             else
             {

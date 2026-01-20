@@ -109,16 +109,18 @@ namespace BloodMoon.AI
 
             // 简单聚类
             // 随机选择一个未分配的节点，找到其邻居
-            for (int i = _unassigned.Count - 1; i >= 0; i--)
+            // 使用临时列表来避免在遍历过程中修改原列表
+            List<BloodMoonAIController> tempUnassigned = new List<BloodMoonAIController>(_unassigned);
+            
+            for (int i = tempUnassigned.Count - 1; i >= 0; i--)
             {
-                var candidate = _unassigned[i];
+                var candidate = tempUnassigned[i];
                 if (candidate == null) 
                 {
-                    _unassigned.RemoveAt(i);
                     continue;
                 }
 
-                var nearby = _unassigned.Where(other => other != candidate && other != null && Vector3.Distance(other.transform.position, candidate.transform.position) < 15f).ToList();
+                var nearby = tempUnassigned.Where(other => other != candidate && other != null && Vector3.Distance(other.transform.position, candidate.transform.position) < 15f).ToList();
                 
                 if (nearby.Count >= 2) // 发现了一个潜在的三人组合
                 {
@@ -127,7 +129,7 @@ namespace BloodMoon.AI
                     
                     // 添加候选人
                     newSquad.AddMember(candidate);
-                    _unassigned.RemoveAt(i);
+                    _unassigned.Remove(candidate);
 
                     // 添加邻居
                     foreach (var n in nearby)
@@ -144,7 +146,7 @@ namespace BloodMoon.AI
                     _coordinator.RegisterSquad(newSquad);
                     BloodMoon.Utils.Logger.Debug($"Formed Squad {newSquad.ID} with {newSquad.Members.Count} members");
                     
-                    // 拆分以避免在迭代过程中过多修改列表（尽管我们是反向迭代，但邻居的移除可能会影响索引，不过目前简单的方法就足够了）
+                    // 拆分以避免在迭代过程中过多修改列表
                     break; 
                 }
             }

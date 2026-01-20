@@ -24,6 +24,20 @@ namespace BloodMoon.Utils
         
         // 通用设置
         public string Language = "zh-CN";
+        
+        // AI设置
+        public float AIAggressionMultiplier = 1.0f;
+        public float AIAccuracyMultiplier = 1.0f;
+        public float AIReactionTimeMultiplier = 1.0f;
+        public float AIDamageMultiplier = 1.0f;
+        
+        // 视觉效果设置
+        public float RedOverlayIntensity = 1.0f;
+        public bool EnableRedOverlay = true;
+        
+        // 调试设置
+        public bool EnableDebugLogging = false;
+        public bool EnableAIDebugVisuals = false;
 
         // 静态单例
         private static ModConfig _instance = null!;
