@@ -22,6 +22,9 @@ namespace BloodMoon.AI
         public float AccuracyMultiplier { get; private set; } = 1.0f;
         public float DamageMultiplier { get; private set; } = 1.0f;
 
+        /// <summary>
+        /// 初始化自适应难度系统
+        /// </summary>
         public void Initialize()
         {
             _instance = this;
@@ -31,18 +34,28 @@ namespace BloodMoon.AI
             // 尽可能挂接到游戏事件，或依赖AI报告
         }
 
+        /// <summary>
+        /// 报告玩家击杀
+        /// </summary>
         public void ReportPlayerKill()
         {
             _playerKills++;
             UpdateDifficulty();
         }
 
+        /// <summary>
+        /// 报告玩家受到的伤害
+        /// </summary>
+        /// <param name="amount">伤害量</param>
         public void ReportPlayerDamage(float amount)
         {
             _playerDamageTaken += (int)amount;
             UpdateDifficulty();
         }
 
+        /// <summary>
+        /// 更新难度分数和各个乘数
+        /// </summary>
         public void UpdateDifficulty()
         {
             try

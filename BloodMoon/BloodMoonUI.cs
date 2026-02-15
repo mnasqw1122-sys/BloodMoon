@@ -12,6 +12,10 @@ namespace BloodMoon
         private readonly BloodMoonEvent _event;
         private TextMeshProUGUI _title = null!;
 
+        /// <summary>
+        /// 构造函数
+        /// </summary>
+        /// <param name="e">血月事件实例</param>
         public BloodMoonUI(BloodMoonEvent e)
         {
             _event = e;
@@ -19,6 +23,10 @@ namespace BloodMoon
 
         public bool IsAttached => _title != null;
 
+        /// <summary>
+        /// 尝试将UI附加到游戏的时间显示上
+        /// </summary>
+        /// <returns>如果成功附加返回true</returns>
         public bool TryAttachToTimeOfDayDisplay()
         {
             if (IsAttached) return true;
@@ -41,6 +49,10 @@ namespace BloodMoon
         private Color _baseColor = new Color(1f, 0.2f, 0.2f); // 红色
         private Color _activeColor = new Color(1f, 0f, 0f); // 深红色
 
+        /// <summary>
+        /// 刷新UI显示
+        /// </summary>
+        /// <param name="now">当前游戏时间</param>
         public void Refresh(TimeSpan now)
         {
             if (_title == null) return;
@@ -86,6 +98,9 @@ namespace BloodMoon
             }
         }
 
+        /// <summary>
+        /// 销毁UI资源
+        /// </summary>
         public void Dispose()
         {
             if (_title != null) UnityEngine.Object.Destroy(_title.gameObject);

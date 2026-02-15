@@ -85,6 +85,7 @@ namespace BloodMoon
         public bool IsBoss;
 
         public CharacterMainControl? CurrentTarget => _context.Target; // 暴露给SquadManager使用
+        public CharacterMainControl? Character => _c; // 暴露给IntelligentSquadCoordinator使用
 
         public void SetChaseDelay(float seconds)
         {

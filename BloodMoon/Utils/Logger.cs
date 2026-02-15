@@ -10,6 +10,10 @@ namespace BloodMoon.Utils
         private static string _logPath = string.Empty;
         private static bool _initialized;
 
+        /// <summary>
+        /// 初始化日志系统
+        /// </summary>
+        /// <param name="modDirectory">模组目录路径</param>
         public static void Initialize(string modDirectory)
         {
             ModDirectory = modDirectory;
@@ -27,24 +31,40 @@ namespace BloodMoon.Utils
             }
         }
 
+        /// <summary>
+        /// 记录信息级别日志
+        /// </summary>
+        /// <param name="message">日志消息</param>
         public static void Log(string message)
         {
             UnityEngine.Debug.Log($"[BloodMoon] {message}");
             WriteToFile($"[INFO] {message}");
         }
 
+        /// <summary>
+        /// 记录警告级别日志
+        /// </summary>
+        /// <param name="message">日志消息</param>
         public static void Warning(string message)
         {
             UnityEngine.Debug.LogWarning($"[BloodMoon] {message}");
             WriteToFile($"[WARN] {message}");
         }
 
+        /// <summary>
+        /// 记录错误级别日志
+        /// </summary>
+        /// <param name="message">日志消息</param>
         public static void Error(string message)
         {
             UnityEngine.Debug.LogError($"[BloodMoon] {message}");
             WriteToFile($"[ERROR] {message}");
         }
 
+        /// <summary>
+        /// 记录调试级别日志（仅在DEBUG模式下）
+        /// </summary>
+        /// <param name="message">日志消息</param>
         public static void Debug(string message)
         {
 #if DEBUG
@@ -53,6 +73,10 @@ namespace BloodMoon.Utils
 #endif
         }
 
+        /// <summary>
+        /// 将日志消息写入文件
+        /// </summary>
+        /// <param name="message">要写入的消息</param>
         private static void WriteToFile(string message)
         {
             if (!_initialized) return;

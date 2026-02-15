@@ -17,7 +17,7 @@ namespace BloodMoon.AI
     public class SquadTactics
     {
         public Squad Squad { get; set; }
-        public string CurrentFormation { get; set; } = "Line"; // 线形
+        public string CurrentFormation { get; set; } = "Line";
         
         public SquadTactics(Squad squad)
         {
@@ -59,7 +59,6 @@ namespace BloodMoon.AI
             
             _lastUpdateTime = Time.time;
             
-            // 清理无效小队
             var keys = _squadTactics.Keys.ToList();
             foreach(var k in keys)
             {
@@ -72,164 +71,132 @@ namespace BloodMoon.AI
             foreach (var squadTactics in _squadTactics.Values)
             {
                 UpdateSquadFormation(squadTactics);
-                CoordinateSquadActions(squadTactics);
-                HandleSquadCommunication(squadTactics);
             }
         }
         
-        private void UpdateSquadFormation(SquadTactics tactics)
+        public void CoordinateSquad(Squad squad)
         {
-            var squad = tactics.Squad;
-            if (squad.Members.Count == 0) return;
+            if (!_squadTactics.ContainsKey(squad.ID))
+            {
+                _squadTactics[squad.ID] = new SquadTactics(squad);
+            }
             
-            // 计算小队中心
-            Vector3 center = Vector3.zero;
-            int activeMembers = 0;
+            var squadTactics = _squadTactics[squad.ID];
+            TacticalSituation situation = EvaluateTacticalSituation(squad);
             
+            AssignOrdersBySituation(squad, situation, squadTactics);
+        }
+        
+        private TacticalSituation EvaluateTacticalSituation(Squad squad)
+        {
+            if (squad.Target == null)
+            {
+                return TacticalSituation.Standard;
+            }
+            
+            int aliveMembers = squad.Members.Count(m => m != null && m.isActiveAndEnabled);
+            float totalHealthPercent = 0f;
             foreach (var member in squad.Members)
             {
-                if (member != null && member.isActiveAndEnabled)
+                if (member != null && member.Character != null)
                 {
-                    center += member.transform.position;
-                    activeMembers++;
+                    totalHealthPercent += member.Character.Health.CurrentHealth / member.Character.Health.MaxHealth;
                 }
             }
             
-            if (activeMembers > 0)
-            {
-                squad.SquadCenter = center / activeMembers;
-            }
-            
-            // 更新阵型位置（如需，将实现相关逻辑，目前仅进行居中计算）
-            // UpdateFormationPositions(队伍, 战术.当前阵型);
-        }
-        
-        private void CoordinateSquadActions(SquadTactics tactics)
-        {
-            var squad = tactics.Squad;
-            
-            // 评估战术形势
-            var tacticalSituation = AssessTacticalSituation(squad);
-            
-            switch (tacticalSituation)
-            {
-                case TacticalSituation.Advancing:
-                    ExecuteAdvancingTactics(squad);
-                    break;
-                    
-                case TacticalSituation.Defending:
-                    ExecuteDefendingTactics(squad);
-                    break;
-                    
-                case TacticalSituation.Flanking:
-                    ExecuteFlankingTactics(squad);
-                    break;
-                    
-                case TacticalSituation.Retreating:
-                    ExecuteRetreatingTactics(squad);
-                    break;
-                    
-                default:
-                    ExecuteStandardTactics(squad);
-                    break;
-            }
-        }
-        
-        private void HandleSquadCommunication(SquadTactics tactics)
-        {
-            // 台词或信号的占位符
-        }
-        
-        private TacticalSituation AssessTacticalSituation(Squad squad)
-        {
-            if (squad.Members.Count == 0) return TacticalSituation.Standard;
-
-            float avgHealth = squad.Members.Average(m => m.GetHealthPercentage());
-            int membersWithWeapons = squad.Members.Count(m => m.HasWeapon);
-            
-            // 计算到目标的平均距离
-            float totalDist = 0f;
-            int count = 0;
-            foreach(var m in squad.Members)
-            {
-                 if (m.CurrentTarget != null)
-                 {
-                     totalDist += Vector3.Distance(m.transform.position, m.CurrentTarget.transform.position);
-                     count++;
-                 }
-            }
-            float distanceToTarget = count > 0 ? totalDist / count : 100f;
+            float avgHealth = aliveMembers > 0 ? totalHealthPercent / aliveMembers : 1f;
+            float distToTarget = Vector3.Distance(squad.SquadCenter, squad.Target.transform.position);
             
             if (avgHealth < 0.3f)
+            {
                 return TacticalSituation.Retreating;
+            }
             
-            if (membersWithWeapons < squad.Members.Count / 2)
+            if (avgHealth > 0.7f && aliveMembers >= 3)
+            {
+                if (distToTarget > 20f)
+                {
+                    return TacticalSituation.Advancing;
+                }
+                else
+                {
+                    return TacticalSituation.Flanking;
+                }
+            }
+            
+            if (distToTarget < 15f)
+            {
                 return TacticalSituation.Defending;
-            
-            if (distanceToTarget < 15f && count > 0)
-                return TacticalSituation.Advancing;
-            
-            if (distanceToTarget > 25f && count > 0)
-                return TacticalSituation.Flanking;
+            }
             
             return TacticalSituation.Standard;
         }
         
-        private void ExecuteAdvancingTactics(Squad squad)
+        private void AssignOrdersBySituation(Squad squad, TacticalSituation situation, SquadTactics squadTactics)
         {
-            // 突击队员推进，支援队员掩护
-            foreach (var member in squad.Members)
+            if (squad.Members.Count == 0) return;
+            
+            for (int i = 0; i < squad.Members.Count; i++)
             {
-                if (member.Role == AIRole.Assault || member.Role == AIRole.Standard)
-                {
-                    member.SetTacticalOrder("AdvanceAndEngage");
-                }
-                else if (member.Role == AIRole.Support || member.Role == AIRole.Sniper)
-                {
-                    member.SetTacticalOrder("ProvideCoveringFire");
-                }
+                var member = squad.Members[i];
+                if (member == null) continue;
+                
+                string order = GetOrderForMember(i, squad.Members.Count, situation);
+                squad.MemberOrders[member] = order;
             }
         }
         
-        private void ExecuteDefendingTactics(Squad squad)
+        private string GetOrderForMember(int memberIndex, int totalMembers, TacticalSituation situation)
         {
-            foreach (var member in squad.Members)
+            switch (situation)
             {
-                member.SetTacticalOrder("HoldPosition");
+                case TacticalSituation.Advancing:
+                    if (memberIndex == 0) return "Engage";
+                    if (memberIndex == 1) return "Flank";
+                    return "SuppressingFire";
+                    
+                case TacticalSituation.Defending:
+                    return "TakeCover";
+                    
+                case TacticalSituation.Flanking:
+                    if (memberIndex == 0) return "Engage";
+                    if (memberIndex % 2 == 0) return "FlankLeft";
+                    return "FlankRight";
+                    
+                case TacticalSituation.Retreating:
+                    return "Retreat";
+                    
+                default:
+                    if (memberIndex == 0) return "Engage";
+                    if (memberIndex == 1) return "Cover";
+                    return "Support";
             }
         }
         
-        private void ExecuteFlankingTactics(Squad squad)
+        private void UpdateSquadFormation(SquadTactics squadTactics)
         {
-            // 分队：2人侧翼，其余压制
-            int flankers = 0;
-            foreach (var member in squad.Members)
+            var squad = squadTactics.Squad;
+            if (!squad.IsValid()) return;
+            
+            TacticalSituation situation = EvaluateTacticalSituation(squad);
+            
+            switch (situation)
             {
-                if (flankers < 2 && (member.Role == AIRole.Assault || member.Role == AIRole.Standard))
-                {
-                    member.SetTacticalOrder("Flank");
-                    flankers++;
-                }
-                else
-                {
-                    member.SetTacticalOrder("Suppress");
-                }
-            }
-        }
-        
-        private void ExecuteRetreatingTactics(Squad squad)
-        {
-            foreach (var member in squad.Members)
-            {
-                member.SetTacticalOrder("Retreat");
-            }
-        }
-        
-        private void ExecuteStandardTactics(Squad squad)
-        {
-             foreach (var member in squad.Members)
-            {
-                member.SetTacticalOrder("Free");
+                case TacticalSituation.Advancing:
+                    squadTactics.CurrentFormation = "Wedge";
+                    break;
+                case TacticalSituation.Defending:
+                    squadTactics.CurrentFormation = "Circle";
+                    break;
+                case TacticalSituation.Flanking:
+                    squadTactics.CurrentFormation = "Line";
+                    break;
+                case TacticalSituation.Retreating:
+                    squadTactics.CurrentFormation = "Column";
+                    break;
+                default:
+                    squadTactics.CurrentFormation = "Loose";
+                    break;
             }
         }
     }

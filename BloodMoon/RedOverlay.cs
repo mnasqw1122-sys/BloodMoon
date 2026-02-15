@@ -24,6 +24,9 @@ namespace BloodMoon
         
         private bool _captured;
 
+        /// <summary>
+        /// 显示红色覆盖效果
+        /// </summary>
         public void Show()
         {
             if (!_isActive)
@@ -33,6 +36,9 @@ namespace BloodMoon
             }
         }
 
+        /// <summary>
+        /// 隐藏红色覆盖效果
+        /// </summary>
         public void Hide()
         {
             if (_isActive)
@@ -44,6 +50,9 @@ namespace BloodMoon
 
         private Scene _capturedScene;
 
+        /// <summary>
+        /// 捕获原始的渲染设置
+        /// </summary>
         private void CaptureOriginals()
         {
             _capturedScene = SceneManager.GetActiveScene();
@@ -55,6 +64,10 @@ namespace BloodMoon
             _captured = true;
         }
 
+        /// <summary>
+        /// 更新红色覆盖效果的每一帧
+        /// </summary>
+        /// <param name="dt">增量时间</param>
         public void Tick(float dt)
         {
             // 安全性：检查场景有效性
@@ -94,6 +107,9 @@ namespace BloodMoon
             ApplyBloodMoonAtmosphere();
         }
 
+        /// <summary>
+        /// 应用血月的大气效果
+        /// </summary>
         private void ApplyBloodMoonAtmosphere()
         {
             RenderSettings.fog = true;
@@ -122,6 +138,9 @@ namespace BloodMoon
             RenderSettings.ambientLight = Color.Lerp(_origAmbient, bloodAmbient, t);
         }
 
+        /// <summary>
+        /// 恢复原始的渲染设置
+        /// </summary>
         private void RestoreOriginals()
         {
             RenderSettings.fog = _origFogEnabled;
@@ -132,6 +151,9 @@ namespace BloodMoon
             _captured = false;
         }
 
+        /// <summary>
+        /// 销毁资源并清理
+        /// </summary>
         public void Dispose()
         {
             if (_captured) RestoreOriginals();

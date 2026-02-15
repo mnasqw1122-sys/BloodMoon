@@ -52,12 +52,19 @@ namespace BloodMoon.Utils
 
         private static string _configPath = string.Empty;
 
+        /// <summary>
+        /// 初始化配置系统
+        /// </summary>
+        /// <param name="modDirectory">模组目录路径</param>
         public static void Initialize(string modDirectory)
         {
             _configPath = Path.Combine(modDirectory, "BloodMoonConfig.json");
             Load();
         }
 
+        /// <summary>
+        /// 从文件加载配置
+        /// </summary>
         public static void Load()
         {
             if (string.IsNullOrEmpty(_configPath)) return;
@@ -85,6 +92,9 @@ namespace BloodMoon.Utils
             }
         }
 
+        /// <summary>
+        /// 保存配置到文件
+        /// </summary>
         public static void Save()
         {
             if (string.IsNullOrEmpty(_configPath) || _instance == null) return;

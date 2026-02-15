@@ -9,10 +9,15 @@ using System.IO;
 
 namespace BloodMoon
 {
+    /// <summary>
+    /// AI数据存储类，负责存储和加载AI的战术数据、危险记忆等
+    /// </summary>
     [Serializable]
     public class AIDataStore
     {
-        // 全局数据（智商/战术）- 在所有地图间共享
+        /// <summary>
+        /// 全局数据（智商/战术）- 在所有地图间共享
+        /// </summary>
         [Serializable]
         private class GlobalSaveData
         {
@@ -21,6 +26,10 @@ namespace BloodMoon
             public List<KeyWeight> strategyWeights = new List<KeyWeight>();
             public List<LeaderPref> leaderPrefs = new List<LeaderPref>();
 
+            /// <summary>
+            /// 从存储对象中读取数据
+            /// </summary>
+            /// <param name="s">数据存储对象</param>
             public void FromStore(AIDataStore s)
             {
                 avgPlayerSpeed = s._avgPlayerSpeed;
@@ -29,6 +38,10 @@ namespace BloodMoon
                 leaderPrefs = s.LeaderPrefs;
             }
 
+            /// <summary>
+            /// 将数据写入存储对象
+            /// </summary>
+            /// <param name="s">数据存储对象</param>
             public void ToStore(AIDataStore s)
             {
                 s._avgPlayerSpeed = avgPlayerSpeed;
@@ -38,7 +51,9 @@ namespace BloodMoon
             }
         }
 
-        // 地图特定数据（记忆/危险）- 每个地图单独
+        /// <summary>
+        /// 地图特定数据（记忆/危险）- 每个地图单独
+        /// </summary>
         [Serializable]
         private class MapSaveData
         {
@@ -48,6 +63,10 @@ namespace BloodMoon
             public int reloadCount;
             public int deathCount;
 
+            /// <summary>
+            /// 从存储对象中读取地图数据
+            /// </summary>
+            /// <param name="s">数据存储对象</param>
             public void FromStore(AIDataStore s)
             {
                 playerAmbushSpots = s.PlayerAmbushSpots;
@@ -57,6 +76,10 @@ namespace BloodMoon
                 deathCount = s.DeathCount;
             }
 
+            /// <summary>
+            /// 将地图数据写入存储对象
+            /// </summary>
+            /// <param name="s">数据存储对象</param>
             public void ToStore(AIDataStore s)
             {
                 if (playerAmbushSpots != null) s.PlayerAmbushSpots = playerAmbushSpots;
@@ -76,6 +99,10 @@ namespace BloodMoon
         public List<Vector3> PlayerAmbushSpots = new List<Vector3>();
         public List<Vector3> StuckSpots = new List<Vector3>();
 
+        /// <summary>
+        /// 标记卡住的位置，避免AI再次卡住
+        /// </summary>
+        /// <param name="pos">卡住的位置</param>
         public void MarkStuckSpot(Vector3 pos)
         {
             // 集群检查
@@ -87,6 +114,12 @@ namespace BloodMoon
             if (StuckSpots.Count > 128) StuckSpots.RemoveAt(0);
         }
 
+        /// <summary>
+        /// 检查位置是否是曾经卡住的位置
+        /// </summary>
+        /// <param name="pos">要检查的位置</param>
+        /// <param name="threshold">距离阈值</param>
+        /// <returns>是否是卡住的位置</returns>
         public bool IsStuckSpot(Vector3 pos, float threshold)
         {
             float sqrThresh = threshold * threshold;
@@ -97,6 +130,10 @@ namespace BloodMoon
             return false;
         }
 
+        /// <summary>
+        /// 标记玩家伏击位置
+        /// </summary>
+        /// <param name="playerPos">玩家位置</param>
         public void MarkPlayerAmbush(Vector3 playerPos)
         {
             // 避免重复记录
@@ -112,6 +149,12 @@ namespace BloodMoon
             if (PlayerAmbushSpots.Count > 32) PlayerAmbushSpots.RemoveAt(0);
         }
 
+        /// <summary>
+        /// 检查位置是否是玩家伏击点
+        /// </summary>
+        /// <param name="pos">要检查的位置</param>
+        /// <param name="threshold">距离阈值</param>
+        /// <returns>是否是伏击点</returns>
         public bool IsPlayerAmbushSpot(Vector3 pos, float threshold)
         {
              float sqrThresh = threshold * threshold;
@@ -164,6 +207,10 @@ namespace BloodMoon
         // 运行时缓存用于O(1)查找
         private Dictionary<string, int> _leaderPrefIndexCache = new Dictionary<string, int>();
 
+        /// <summary>
+        /// 记录玩家移动速度，用于AI学习
+        /// </summary>
+        /// <param name="v">玩家速度</param>
         public void RecordPlayerSpeed(float v)
         {
             if (v > 0.05f && v < 15f)
@@ -173,11 +220,19 @@ namespace BloodMoon
             }
         }
 
+        /// <summary>
+        /// 获取平均玩家速度
+        /// </summary>
+        /// <returns>平均速度</returns>
         public float GetAverageSpeed()
         {
             return _avgPlayerSpeed;
         }
 
+        /// <summary>
+        /// 标记危险位置
+        /// </summary>
+        /// <param name="pos">危险位置</param>
         public void MarkDanger(Vector3 pos)
         {
             DangerEvents.Add(new DangerEvent { pos = pos, time = Time.time, weight = 1f });
@@ -255,6 +310,9 @@ namespace BloodMoon
             return $"map_{name}.json";
         }
 
+        /// <summary>
+        /// 保存AI数据到文件
+        /// </summary>
         public void Save()
         {
             try
@@ -279,6 +337,9 @@ namespace BloodMoon
             }
         }
 
+        /// <summary>
+        /// 从文件加载AI数据
+        /// </summary>
         public void Load()
         {
             try
@@ -659,13 +720,23 @@ namespace BloodMoon
         }
     }
 
+    /// <summary>
+    /// 空间网格类，用于高效的空间查询
+    /// </summary>
     public class SpatialGrid
     {
         private Dictionary<Vector2Int, List<CharacterMainControl>> _grid = new Dictionary<Vector2Int, List<CharacterMainControl>>();
         private float _cellSize = 15f; // 大小
         
+        /// <summary>
+        /// 清空网格
+        /// </summary>
         public void Clear() => _grid.Clear();
         
+        /// <summary>
+        /// 添加角色到网格
+        /// </summary>
+        /// <param name="c">角色对象</param>
         public void Add(CharacterMainControl c)
         {
             Vector2Int cell = GetCell(c.transform.position);
@@ -677,6 +748,12 @@ namespace BloodMoon
             list.Add(c);
         }
         
+        /// <summary>
+        /// 查询指定范围内的角色
+        /// </summary>
+        /// <param name="pos">中心位置</param>
+        /// <param name="radius">查询半径</param>
+        /// <param name="result">结果列表</param>
         public void Query(Vector3 pos, float radius, List<CharacterMainControl> result)
         {
             result.Clear();
@@ -705,6 +782,11 @@ namespace BloodMoon
             }
         }
         
+        /// <summary>
+        /// 获取位置所在的网格单元
+        /// </summary>
+        /// <param name="pos">位置</param>
+        /// <returns>网格单元坐标</returns>
         private Vector2Int GetCell(Vector3 pos)
         {
             return new Vector2Int(Mathf.FloorToInt(pos.x / _cellSize), Mathf.FloorToInt(pos.z / _cellSize));

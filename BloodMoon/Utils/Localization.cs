@@ -32,6 +32,11 @@ namespace BloodMoon.Utils
             }
         };
 
+        /// <summary>
+        /// 获取本地化文本
+        /// </summary>
+        /// <param name="key">文本键</param>
+        /// <returns>本地化后的文本，如果找不到则返回键本身</returns>
         public static string Get(string key)
         {
             // 安全：处理配置未就绪

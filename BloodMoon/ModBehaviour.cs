@@ -27,6 +27,9 @@ namespace BloodMoon
         private BloodMoon.AI.AdaptiveDifficulty _difficulty = null!;
         private BloodMoon.AI.SquadManager _squadManager = null!;
 
+        /// <summary>
+        /// 模组唤醒时调用，初始化所有系统
+        /// </summary>
         private void Awake()
         {
             // 初始化日志记录器和配置
@@ -73,6 +76,12 @@ namespace BloodMoon
             Application.logMessageReceivedThreaded += OnLogMessage;
         }
 
+        /// <summary>
+        /// 处理Unity日志消息，记录错误和警告
+        /// </summary>
+        /// <param name="condition">日志内容</param>
+        /// <param name="stackTrace">堆栈跟踪</param>
+        /// <param name="type">日志类型</param>
         private void OnLogMessage(string condition, string stackTrace, LogType type)
         {
             if (condition.StartsWith("[BloodMoon]")) return; // 如果我们的日志记录器使用Debug.Log，避免无限递归
@@ -160,12 +169,18 @@ namespace BloodMoon
             }
         }
 
+        /// <summary>
+        /// 模组启动时调用，加载保存的数据并初始化Boss管理器
+        /// </summary>
         private void Start()
         {
             Load();
             _bossManager.Initialize();
         }
 
+        /// <summary>
+        /// 模组销毁时调用，清理资源和事件监听器
+        /// </summary>
         private void OnDestroy()
         {
             Application.logMessageReceived -= OnLogMessage;
@@ -176,18 +191,27 @@ namespace BloodMoon
             _ui?.Dispose();
         }
 
+        /// <summary>
+        /// 保存模组数据到存档系统
+        /// </summary>
         private void Save()
         {
             _event.Save();
             _dataStore.Save();
         }
 
+        /// <summary>
+        /// 从存档系统加载模组数据
+        /// </summary>
         private void Load()
         {
             _event.Load();
             _dataStore.Load();
         }
 
+        /// <summary>
+        /// 模组启用时调用，附加UI和事件监听器
+        /// </summary>
         private void OnEnable()
         {
             UniTask.Void(async () =>
@@ -207,11 +231,17 @@ namespace BloodMoon
             LevelManager.OnLevelInitialized += OnLevelInitialized;
         }
 
+        /// <summary>
+        /// 模组禁用时调用，移除事件监听器
+        /// </summary>
         private void OnDisable()
         {
             LevelManager.OnLevelInitialized -= OnLevelInitialized;
         }
 
+        /// <summary>
+        /// 关卡初始化时调用，设置场景
+        /// </summary>
         private void OnLevelInitialized()
         {
 
@@ -232,6 +262,9 @@ namespace BloodMoon
 
         private float _uiRefreshTimer;
 
+        /// <summary>
+        /// 每帧更新，处理血月逻辑和UI刷新
+        /// </summary>
         private void Update()
         {
             var now = GameClock.Now;
@@ -270,6 +303,9 @@ namespace BloodMoon
             }
         }
 
+        /// <summary>
+        /// 每帧后期更新，处理视觉效果
+        /// </summary>
         private void LateUpdate()
         {
             // 在游戏逻辑后处理大气视觉效果覆盖

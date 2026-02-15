@@ -9,6 +9,8 @@ namespace BloodMoon.Utils
         /// <summary>
         /// 安全执行同步操作，捕获并记录异常
         /// </summary>
+        /// <param name="action">要执行的操作</param>
+        /// <param name="context">上下文描述，用于日志</param>
         public static void SafeExecute(Action action, string context = "")
         {
             try
@@ -34,6 +36,8 @@ namespace BloodMoon.Utils
         /// <summary>
         /// 安全执行异步操作，捕获并记录异常
         /// </summary>
+        /// <param name="asyncAction">要执行的异步操作</param>
+        /// <param name="context">上下文描述，用于日志</param>
         public static async UniTask SafeExecuteAsync(Func<UniTask> asyncAction, string context = "")
         {
             try
@@ -63,6 +67,11 @@ namespace BloodMoon.Utils
         /// <summary>
         /// 安全执行异步操作并返回结果，捕获并记录异常
         /// </summary>
+        /// <param name="asyncAction">要执行的异步操作</param>
+        /// <param name="context">上下文描述，用于日志</param>
+        /// <param name="defaultValue">默认值，当操作失败时返回</param>
+        /// <typeparam name="T">返回值类型</typeparam>
+        /// <returns>操作结果或默认值</returns>
         public static async UniTask<T> SafeExecuteAsync<T>(Func<UniTask<T>> asyncAction, string context = "", T defaultValue = default!)
         {
             try
@@ -90,6 +99,10 @@ namespace BloodMoon.Utils
         /// <summary>
         /// 验证参数不为空，如果为空则记录错误
         /// </summary>
+        /// <param name="obj">要验证的对象</param>
+        /// <param name="paramName">参数名</param>
+        /// <param name="context">上下文描述</param>
+        /// <returns>如果对象不为空返回true，否则返回false</returns>
         public static bool ValidateNotNull(object? obj, string paramName, string context = "")
         {
             if (obj == null)
@@ -103,6 +116,11 @@ namespace BloodMoon.Utils
         /// <summary>
         /// 验证索引在范围内，如果不在范围内则记录错误
         /// </summary>
+        /// <param name="index">要验证的索引</param>
+        /// <param name="count">集合大小</param>
+        /// <param name="arrayName">集合名称</param>
+        /// <param name="context">上下文描述</param>
+        /// <returns>如果索引有效返回true，否则返回false</returns>
         public static bool ValidateIndex(int index, int count, string arrayName, string context = "")
         {
             if (index < 0 || index >= count)
@@ -116,6 +134,11 @@ namespace BloodMoon.Utils
         /// <summary>
         /// 验证集合不为空，如果为空则记录错误
         /// </summary>
+        /// <param name="collection">要验证的集合</param>
+        /// <param name="collectionName">集合名称</param>
+        /// <param name="context">上下文描述</param>
+        /// <typeparam name="T">集合元素类型</typeparam>
+        /// <returns>如果集合有效返回true，否则返回false</returns>
         public static bool ValidateCollectionNotEmpty<T>(System.Collections.Generic.ICollection<T>? collection, string collectionName, string context = "")
         {
             if (collection == null)

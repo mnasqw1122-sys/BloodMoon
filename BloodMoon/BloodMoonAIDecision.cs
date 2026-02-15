@@ -7,7 +7,9 @@ using ItemStatsSystem;
 
 namespace BloodMoon
 {
-    // 上下文对象，用于在Controller和Actions之间传递数据
+    /// <summary>
+    /// AI上下文对象，用于在Controller和Actions之间传递数据
+    /// </summary>
     public class AIContext
     {
         public CharacterMainControl? Character;
@@ -58,6 +60,9 @@ namespace BloodMoon
         private static List<CharacterMainControl> _cachedCharacters = new List<CharacterMainControl>();
         private static float _lastCacheTime;
 
+        /// <summary>
+        /// 缓存所有角色（已弃用，使用Store.AllCharacters）
+        /// </summary>
         private static void CacheAllCharacters()
         {
             if (Time.time - _lastCacheTime < 2.0f) return; 
@@ -70,6 +75,9 @@ namespace BloodMoon
             }
         }
 
+        /// <summary>
+        /// 更新AI的感官数据，包括目标选择、距离、视线等
+        /// </summary>
         public void UpdateSensors()
         {
             if (Character == null) return;
@@ -276,6 +284,9 @@ namespace BloodMoon
         }
     }
 
+    /// <summary>
+    /// AI动作基类，所有具体AI动作都继承自此类
+    /// </summary>
     public abstract class AIAction
     {
         public string Name = string.Empty;
@@ -288,8 +299,23 @@ namespace BloodMoon
         protected float _maxActionDuration;
         protected bool _shouldExit;
         
+        /// <summary>
+        /// 评估当前动作的适合度分数
+        /// </summary>
+        /// <param name="ctx">AI上下文</param>
+        /// <returns>动作分数，越高越适合执行</returns>
         public abstract float Evaluate(AIContext ctx);
+        
+        /// <summary>
+        /// 执行当前动作
+        /// </summary>
+        /// <param name="ctx">AI上下文</param>
         public abstract void Execute(AIContext ctx);
+        
+        /// <summary>
+        /// 进入动作时调用
+        /// </summary>
+        /// <param name="ctx">AI上下文</param>
         public virtual void OnEnter(AIContext ctx) 
         { 
             _timeInAction = 0f;
@@ -298,35 +324,57 @@ namespace BloodMoon
             _minActionDuration = 1.0f;
             _maxActionDuration = 10.0f;
         }
+        
+        /// <summary>
+        /// 退出动作时调用
+        /// </summary>
+        /// <param name="ctx">AI上下文</param>
         public virtual void OnExit(AIContext ctx) 
         { 
             _timeInAction = 0f;
             _shouldExit = false;
         }
         
-        // 更新动作时间并检查是否应该继续
+        /// <summary>
+        /// 更新动作时间并检查是否应该继续
+        /// </summary>
+        /// <param name="dt">时间增量</param>
         public void UpdateActionTime(float dt)
         {
             _timeInAction += dt;
         }
         
-        // 检查动作是否可以被中断
+        /// <summary>
+        /// 检查动作是否可以被中断
+        /// </summary>
+        /// <returns>是否可以中断</returns>
         public bool CanBeInterrupted()
         {
             return _timeInAction > _minActionDuration;
         }
         
-        // 检查动作是否应该自动退出
+        /// <summary>
+        /// 检查动作是否应该自动退出
+        /// </summary>
+        /// <returns>是否应该退出</returns>
         public bool ShouldExit()
         {
             return _shouldExit || _timeInAction > _maxActionDuration;
         }
         
+        /// <summary>
+        /// 检查动作是否在冷却中
+        /// </summary>
+        /// <returns>是否在冷却中</returns>
         public bool IsCoolingDown() 
         { 
             return _cooldown > 0f; 
         }
         
+        /// <summary>
+        /// 更新动作冷却时间
+        /// </summary>
+        /// <param name="dt">时间增量</param>
         public void UpdateCooldown(float dt)
         {
             if (_cooldown > 0f) _cooldown -= dt;

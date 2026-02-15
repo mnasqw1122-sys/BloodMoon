@@ -12,6 +12,9 @@ namespace BloodMoon
         public float Teamwork;    // 偏好小队战术/支援
         public float Greed;       // 偏好掠夺/击杀 vs 战术
 
+        /// <summary>
+        /// 构造函数，创建默认平衡性格
+        /// </summary>
         public AIPersonality()
         {
             // 默认平衡性格
@@ -21,6 +24,10 @@ namespace BloodMoon
             Greed = 0.5f;
         }
 
+        /// <summary>
+        /// 生成随机性格
+        /// </summary>
+        /// <returns>随机生成的AIPersonality实例</returns>
         public static AIPersonality GenerateRandom()
         {
             var p = new AIPersonality();
@@ -34,6 +41,10 @@ namespace BloodMoon
             return p;
         }
 
+        /// <summary>
+        /// 返回性格的字符串表示
+        /// </summary>
+        /// <returns>格式化的性格字符串</returns>
         public override string ToString()
         {
             return $"[Agg:{Aggression:F2} Caut:{Caution:F2} Team:{Teamwork:F2}]";
