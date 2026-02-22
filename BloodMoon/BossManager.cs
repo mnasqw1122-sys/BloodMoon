@@ -300,8 +300,8 @@ namespace BloodMoon
 
                          DisableVanillaAI(clone);
                          
-                         Multiply(charItem, "WalkSpeed", 1.2f);
-                         Multiply(charItem, "RunSpeed", 1.2f);
+                         Multiply(charItem, "WalkSpeed", ModConfig.Instance.MinionSpeedMultiplier);
+                         Multiply(charItem, "RunSpeed", ModConfig.Instance.MinionSpeedMultiplier);
                          
                          BoostDefense(charItem, false);
                          
@@ -443,9 +443,9 @@ namespace BloodMoon
                 var maxHealth = item.GetStat("MaxHealth".GetHashCode());
                 if (maxHealth != null) maxHealth.BaseValue *= ModConfig.Instance.BossHealthMultiplier;
                 
-                Multiply(item, "WalkSpeed", 1.35f);
-                Multiply(item, "RunSpeed", 1.35f);
-                Multiply(item, "TurnSpeed", 1.35f);
+                Multiply(item, "WalkSpeed", ModConfig.Instance.BossSpeedMultiplier);
+                Multiply(item, "RunSpeed", ModConfig.Instance.BossSpeedMultiplier);
+                Multiply(item, "TurnSpeed", ModConfig.Instance.BossSpeedMultiplier);
                 BoostDefense(item, true);
                 
                 FixWeight(c, item);
@@ -482,8 +482,8 @@ namespace BloodMoon
             {
                 var filter = new ItemFilter
                 {
-                    minQuality = 4,
-                    maxQuality = 10
+                    minQuality = ModConfig.Instance.BossLootMinQuality,
+                    maxQuality = ModConfig.Instance.BossLootMaxQuality
                 };
 
                 int[]? ids = null;
@@ -495,7 +495,7 @@ namespace BloodMoon
                 
                 if (ids != null && ids.Length > 0)
                 {
-                    int count = UnityEngine.Random.Range(1, 4);
+                    int count = UnityEngine.Random.Range(ModConfig.Instance.BossLootMinCount, ModConfig.Instance.BossLootMaxCount + 1);
                     for (int i = 0; i < count; i++)
                     {
                         int id = ids[UnityEngine.Random.Range(0, ids.Length)];
@@ -528,8 +528,8 @@ namespace BloodMoon
             var light = lightObj.AddComponent<Light>();
             light.type = LightType.Point;
             light.color = new Color(1f, 0.1f, 0.1f);
-            light.range = 6.0f;
-            light.intensity = 4.0f;
+            light.range = ModConfig.Instance.BossGlowRange;
+            light.intensity = ModConfig.Instance.BossGlowIntensity;
             light.shadows = LightShadows.Soft;
 
             var renderers = c.GetComponentsInChildren<Renderer>();
