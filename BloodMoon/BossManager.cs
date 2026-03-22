@@ -113,11 +113,18 @@ namespace BloodMoon
                 if (_weightCheckTimer <= 0f)
                 {
                     _weightCheckTimer = 10.0f;
-                    foreach(var c in _processed)
+                    // 安全的集合遍历
+                    var list = _processed.ToList();
+                    foreach(var c in list)
                     {
                         if (c != null && c.gameObject.activeInHierarchy && c.Health.CurrentHealth > 0)
                         {
                             FixWeight(c, c.CharacterItem);
+                        }
+                        else
+                        {
+                            // 移除无效的引用
+                            _processed.Remove(c);
                         }
                     }
                 }
@@ -135,7 +142,11 @@ namespace BloodMoon
                 
                 if (_scanCooldown > 0.9f)
                 {
-                     _store.DecayAndPrune(Time.time, 120f);
+                     // 确保 _store 不为 null
+                     if (_store != null)
+                     {
+                         _store.DecayAndPrune(Time.time, 120f);
+                     }
                      
                      if (_pointsCache.Count == 0)
                      {
@@ -144,8 +155,12 @@ namespace BloodMoon
                      }
                 }
 
+                if (_store == null) return;
+                // 优化：仅处理有效的角色
                 var all = _store.AllCharacters;
                 int count = all.Count;
+                var playerPos = player != null ? player.transform.position : Vector3.zero;
+                bool hasPlayer = player != null;
                 
                 for (int i = 0; i < count; i++)
                 {
@@ -153,6 +168,12 @@ namespace BloodMoon
                     if (c == null || c.IsMainCharacter) continue;
                     
                     if (_processed.Contains(c)) continue;
+
+                    // 距离检查优化：距离玩家太远的角色不处理
+                    if (hasPlayer && Vector3.SqrMagnitude(c.transform.position - playerPos) > 40000f) // 200m^2
+                    {
+                        continue;
+                    }
 
                     var preset = c.characterPreset;
                     bool isBoss = preset != null && preset.GetCharacterIcon() == GameplayDataSettings.UIStyle.BossCharacterIcon;
@@ -174,7 +195,7 @@ namespace BloodMoon
                 _strategyDecayTimer -= Time.deltaTime;
                 if (_strategyDecayTimer <= 0f)
                 {
-                    _store.DecayWeights(0.98f);
+                    if (_store != null) _store.DecayWeights(0.98f);
                     _strategyDecayTimer = 30f;
                 }
             }
@@ -233,7 +254,10 @@ namespace BloodMoon
         {
             if (boss == null) return;
 
-            var minionPresets = GameplayDataSettings.CharacterRandomPresetData.presets
+            var presets = GameplayDataSettings.CharacterRandomPresetData.presets;
+            if (presets == null) return;
+
+            var minionPresets = presets
                 .Where(p => p != null && 
                        p.GetCharacterIcon() != GameplayDataSettings.UIStyle.BossCharacterIcon &&
                        p.GetCharacterIcon() != GameplayDataSettings.UIStyle.MerchantCharacterIcon &&
@@ -250,6 +274,7 @@ namespace BloodMoon
             int count = ModConfig.Instance.BossMinionCount;
             count = Mathf.Clamp(count, 3, 10); 
 
+            // 批量生成以减少每帧开销
             for (int i = 0; i < count; i++)
             { 
                  var preset = minionPresets[UnityEngine.Random.Range(0, minionPresets.Count)];
@@ -277,8 +302,8 @@ namespace BloodMoon
                      var clone = await preset.CreateCharacterAsync(spawnPos, Vector3.forward, scene, null, false);
                      if (clone != null)
                      {
+                         // 减少等待时间
                          await UniTask.Yield(PlayerLoopTiming.Update);
-                         await UniTask.Delay(500); 
                          
                          if (clone == null) continue;
                          
@@ -292,8 +317,13 @@ namespace BloodMoon
                              continue;
                          }
                          
+                         // 快速初始化
                          var anim = clone.GetComponent<Animator>();
-                         if (anim != null && !anim.isInitialized) await UniTask.Delay(200);
+                         if (anim != null && !anim.isInitialized) 
+                         {
+                             // 不再长时间等待，而是让它在后台初始化
+                             // await UniTask.Delay(200); 
+                         }
 
                          var charItem = clone.CharacterItem;
                          if (charItem == null) continue;
@@ -313,7 +343,8 @@ namespace BloodMoon
 
                          clone.SetTeam(Teams.wolf);
                          
-                        await EnsureMinionHasWeapons(clone);
+                        // 并行武器检查
+                        EnsureMinionHasWeapons(clone).Forget();
                         
                         var custom = clone.gameObject.AddComponent<BloodMoonAIController>();
                         custom.Init(clone, _store);
