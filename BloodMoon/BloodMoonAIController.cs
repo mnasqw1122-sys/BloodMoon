@@ -41,7 +41,17 @@ namespace BloodMoon
         private async UniTaskVoid FindWeaponsAsync()
         {
             if (_c == null) return;
-            await ComprehensiveWeaponSystem.Instance.FindWeaponsForAI(_c);
+            var set = await ComprehensiveWeaponSystem.Instance.FindWeaponsForAI(_c);
+            if (set == null) return;
+            // 旧版丢弃 WeaponSet 结果 → 敌人从不掏枪。拿到武器后主动切换：
+            if (set.PrimaryWeapon != null || set.SecondaryWeapon != null)
+            {
+                _c.SwitchToWeapon(0);
+            }
+            else if (set.MeleeWeapon != null)
+            {
+                _c.SwitchToWeapon(-1);
+            }
         }
         
         // --- 移动和路径查找 ---
@@ -55,6 +65,8 @@ namespace BloodMoon
         private float _doorStuckTimer;
         private Vector3 _lastDoorCheckPos;
         private float _aliveTime;
+        private float _baseGunDmgMult = -1f;   // 初始枪械伤害倍率（难度同步用）
+        private float _dmgSyncTimer;
         private Vector3 _prevPos;
         private float _stuckTimer;
         private float _lastPathRequestTime; // 上次路径请求时间
@@ -103,13 +115,10 @@ namespace BloodMoon
         public void SetSquad(Squad? squad)
         {
             _currentSquad = squad;
-            if (squad != null)
-            {
-                // 更新小队上下文
-                if (_context != null) _context.SquadOrder = SquadManager.Instance.GetOrder(this) ?? "";
-            }
+            // 订单由 SquadManager 每 0.5s 周期推送（SetTacticalOrder），组队瞬间订单为空是正常的
+            if (_context != null) _context.SquadOrder = string.Empty;
         }
-        
+
         private static readonly List<BloodMoonAIController> _all = new List<BloodMoonAIController>();
         public static List<BloodMoonAIController> AllControllers => _all;
 
@@ -121,7 +130,8 @@ namespace BloodMoon
             if (_context != null) _context.SquadOrder = order;
         }
 
-        private static readonly List<CharacterMainControl> _nearbyCache = new List<CharacterMainControl>();
+        // 邻域缓存必须是实例字段：static 会让多个 AI 的分离计算结果互相串数据
+        private readonly List<CharacterMainControl> _nearbyCache = new List<CharacterMainControl>();
         private static readonly Collider[] _nonAllocColliders = new Collider[16];
         private float _sepCooldown;
         private UnityEngine.Vector3 _sepBgResult;
@@ -185,9 +195,9 @@ namespace BloodMoon
             _actions.Add(new Action_Patrol());
             _actions.Add(new Action_Panic());
 
-            // 初始化神经脑
+            // 初始化神经脑（仅保留基类：ContextAware 会读取从未赋值的上下文把武器动作分数清零）
             var actionNames = _actions.Select(a => a.Name).ToList();
-            _neuralBrain = new ContextAwareDecisionMaker(actionNames);
+            _neuralBrain = new NeuralDecisionMaker(actionNames);
 
             // 初始化行为系统
             _behaviorSystem = new StableBehaviorSystem();
@@ -224,6 +234,14 @@ namespace BloodMoon
             if (vanilla != null && vanilla.enabled) vanilla.enabled = false;
 
             _aliveTime += Time.deltaTime;
+
+            // 难度接线：每 5s 把伤害乘数同步到枪械伤害 stat（旧版 DamageMultiplier 算了没人读）
+            _dmgSyncTimer += Time.deltaTime;
+            if (_dmgSyncTimer >= 5f)
+            {
+                _dmgSyncTimer = 0f;
+                SyncDamageMultiplier();
+            }
             
             // 全局更新（计时器需要平滑更新）
             UpdateTimers();
@@ -274,11 +292,18 @@ namespace BloodMoon
 
                         float score = action.Evaluate(_context);
                         
-                        // 混合决策：规则库（90%）+ 神经网络（10%）
+                        // 难度接线：攻击性乘数提升进攻动作优先级（旧版算了没人读）
+                        if (action.Name == "Engage" || action.Name == "Chase" || action.Name == "Rush")
+                        {
+                            var diff = AdaptiveDifficulty.Instance;
+                            if (diff != null) score *= diff.AggressionMultiplier;
+                        }
+                        
+                        // 决策：纯规则评分。神经网络权重是随机初始化且从未训练，
+                        // 混入只会注入随机噪声（旧版 10%~40% 导致 AI 行为发疯）
+                        float neuralWeight = 0f;
                         if (neuralScores.TryGetValue(action.Name, out float nScore))
                         {
-                            // 动态权重：随时间增加神经影响（5分钟后最高达40%）
-                            float neuralWeight = Mathf.Lerp(0.1f, 0.4f, Mathf.Clamp01(_aliveTime / 300f));
                             score = score * (1f - neuralWeight) + nScore * neuralWeight;
                         }
                         
@@ -837,6 +862,10 @@ namespace BloodMoon
                          _shootTimer = Random.Range(0.5f, 1.0f);
                     else
                         _shootTimer = Random.Range(0.2f, 0.5f);
+
+                    // 难度接线：反应时间乘数（难度高 → 射击节拍更快，旧版算了没人读）
+                    var diff = AdaptiveDifficulty.Instance;
+                    if (diff != null) _shootTimer *= diff.ReactionTimeMultiplier;
                 }
             }
             else
@@ -844,7 +873,7 @@ namespace BloodMoon
                 _c.Trigger(false, false, false);
             }
             
-            ManageSkillUse(true, dist);
+            ManageSkillUse(_context.HasLoS, dist);
             HandleDash();
         }
         
@@ -1144,25 +1173,17 @@ namespace BloodMoon
                     _doorStuckTimer = 0f;
                     _repathTimer = -1f; 
                     _waitingForPath = false; 
-                    return (_c.transform.position - targetPos).normalized;
+                    // 返回零向量：停止移动，交给 Unstuck 动作处理。
+                    // 旧版朝远离目标方向移动会原地乱跑/穿墙
+                    return Vector3.zero;
                 }
             }
 
             // 优化的目标验证与距离阈值
             float distToTarget = Vector3.Distance(_c.transform.position, targetPos);
             
-            // 分层距离逻辑用于性能优化
-            if (distToTarget > 100f) // 非常远——采用简单运动（从150f降低到100f）
-            {
-                // 目标距离非常远，采用无需路径规划的简单移动方式
-                // 记录日志以便调试
-                if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
-                {
-                    BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Target too far ({distToTarget:F1}m), using direct movement");
-                }
-                return (targetPos - _c.transform.position).normalized;
-            }
-            else if (distToTarget < 3f) // 非常接近——无需路径规划
+            // 旧版：>100m 直线移动（不寻路）→ 敌人直线穿墙/下悬崖。已移除，全部走寻路。
+            if (distToTarget < 3f) // 非常接近——无需路径规划
             {
                 // 目标非常近，直接移动
                 return (targetPos - _c.transform.position).normalized;
@@ -1626,6 +1647,8 @@ namespace BloodMoon
         private void ManageSkillUse(bool hasLoS, float dist)
         {
             if (_skillCooldown > 0f) return;
+            // 看不到目标时不空放技能（旧版无差别释放：手电筒/收音机被当技能乱丢）
+            if (!hasLoS) return;
              // 简化技能应用
             var inv = _c.CharacterItem?.Inventory; if (inv == null) return;
             foreach(var item in inv) {
@@ -1636,7 +1659,7 @@ namespace BloodMoon
                      _c.SetSkill(SkillTypes.itemSkill, ss.Skill, ss.Skill.gameObject);
                      if(_c.StartSkillAim(SkillTypes.itemSkill)) {
                          _c.ReleaseSkill(SkillTypes.itemSkill);
-                         _skillCooldown = 8f;
+                         _skillCooldown = 20f; // 旧版 8s 太频繁
                          return;
                      }
                 }
@@ -1685,6 +1708,19 @@ namespace BloodMoon
                 _store.MarkDanger(_c.transform.position);
             }
         }
+
+        /// <summary>
+        /// 把自适应难度的伤害乘数同步到枪械伤害 stat（难度变化时敌人伤害随之变化）
+        /// </summary>
+        private void SyncDamageMultiplier()
+        {
+            var diff = AdaptiveDifficulty.Instance;
+            if (diff == null || _c == null || _c.CharacterItem == null) return;
+            var stat = _c.CharacterItem.GetStat("GunDamageMultiplier".GetHashCode());
+            if (stat == null) return;
+            if (_baseGunDmgMult < 0f) _baseGunDmgMult = stat.BaseValue;
+            stat.BaseValue = _baseGunDmgMult * diff.DamageMultiplier;
+        }
         
         private void OnDeadAI(DamageInfo dmg)
         {
@@ -1695,8 +1731,13 @@ namespace BloodMoon
 
             if (SquadManager.Instance != null) SquadManager.Instance.UnregisterAI(this);
             
-            // 暂且假设若AI死亡则判定为玩家击杀（简化处理）
-            if (AdaptiveDifficulty.Instance != null) AdaptiveDifficulty.Instance.ReportPlayerKill();
+            _all.Remove(this);
+
+            // 只有玩家击杀才计入难度（旧版无条件调用：AI 互杀/摔死也会抬高难度）
+            if (dmg.fromCharacter != null && dmg.fromCharacter.IsMainCharacter)
+            {
+                if (AdaptiveDifficulty.Instance != null) AdaptiveDifficulty.Instance.ReportPlayerKill();
+            }
 
             if (_c != null)
             {
@@ -1911,6 +1952,12 @@ namespace BloodMoon
         
         private void OnDestroy()
         {
+            // 退订生命周期事件，避免事件泄漏/死对象引用
+            if (_c != null && _c.Health != null)
+            {
+                _c.Health.OnHurtEvent.RemoveListener(OnHurt);
+                _c.Health.OnDeadEvent.RemoveListener(OnDeadAI);
+            }
             if (SquadManager.Instance != null) SquadManager.Instance.UnregisterAI(this);
             _all.Remove(this);
         }

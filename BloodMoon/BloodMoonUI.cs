@@ -41,13 +41,15 @@ namespace BloodMoon
             _title.transform.SetParent(parent);
             _title.transform.localScale = Vector3.one;
             _title.fontSize = tod.stormTitleText.fontSize;
-            _title.rectTransform.anchoredPosition = tod.stormTitleText.rectTransform.anchoredPosition + new Vector2(0, -75);
+            _baseAnchoredPos = tod.stormTitleText.rectTransform.anchoredPosition + new Vector2(0, -75);
+            _title.rectTransform.anchoredPosition = _baseAnchoredPos;
             return true;
         }
 
         private string _lastTimeStr = string.Empty;
-        private Color _baseColor = new Color(1f, 0.2f, 0.2f); // 红色
-        private Color _activeColor = new Color(1f, 0f, 0f); // 深红色
+        private Color _baseColor = new Color(1f, 0.2f, 0.2f);
+        private Color _activeColor = new Color(1f, 0f, 0f);
+        private Vector2 _baseAnchoredPos;
 
         /// <summary>
         /// 刷新UI显示
@@ -61,11 +63,9 @@ namespace BloodMoon
             var remain = active ? _event.GetOverETA(now) : eta;
             var label = active ? Localization.Get("Event_Active") : Localization.Get("Event_Incoming");
             
-            // 确保时间不为负数
             if (remain.TotalHours < 0) remain = TimeSpan.Zero;
             var timeStr = $"{Mathf.Max(0, Mathf.FloorToInt((float)remain.TotalHours)):000}:{Mathf.Abs(remain.Minutes):00}";
             
-            // 1. 文本内容
             string difficultyStr = "";
             if (BloodMoon.AI.AdaptiveDifficulty.Instance != null)
             {
@@ -81,20 +81,19 @@ namespace BloodMoon
                 _lastTimeStr = fullStr;
             }
 
-            // 2. 视觉效果（脉冲）
             float pulseSpeed = active ? 4.0f : 1.0f;
-            float alpha = Mathf.PingPong(Time.time * pulseSpeed, 0.5f) + 0.5f; // 0.5 到 1.0
+            float alpha = Mathf.PingPong(Time.time * pulseSpeed, 0.5f) + 0.5f;
             
             if (active)
             {
                 _title.color = new Color(_activeColor.r, _activeColor.g, _activeColor.b, alpha);
-                // 如果非常活跃，添加抖动效果
-                _title.rectTransform.anchoredPosition += UnityEngine.Random.insideUnitCircle * 0.5f;
+                Vector2 jitter = UnityEngine.Random.insideUnitCircle * 0.5f;
+                _title.rectTransform.anchoredPosition = _baseAnchoredPos + jitter;
             }
             else
             {
-                // 橙色/黄色警告
                 _title.color = new Color(1f, 0.6f, 0f, alpha);
+                _title.rectTransform.anchoredPosition = _baseAnchoredPos;
             }
         }
 

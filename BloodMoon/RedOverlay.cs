@@ -74,10 +74,9 @@ namespace BloodMoon
             var currentScene = SceneManager.GetActiveScene();
             if (_captured && currentScene != _capturedScene)
             {
-                // 场景已更改！我们捕获的数据对此新场景无效
-                // 重置捕获状态，以便我们在下一帧捕获新场景的默认值
-                _captured = false; 
-                // 不要将旧场景的设置恢复到新场景
+                _captured = false;
+                _isActive = false;
+                _transitionProgress = 0f;
             }
 
             // 计算过渡

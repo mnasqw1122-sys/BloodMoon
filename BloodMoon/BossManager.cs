@@ -21,6 +21,8 @@ namespace BloodMoon
         private readonly AIDataStore _store;
         private bool _initialized;
         private readonly HashSet<CharacterMainControl> _processed = new HashSet<CharacterMainControl>();
+        private readonly HashSet<CharacterMainControl> _minionSpawned = new HashSet<CharacterMainControl>(); // 已刷过随从的 Boss（防无限刷）
+        private float _recheckSpawnerTimer = 15f;
         
         private int _currentScene = -1;
         private bool _sceneSetupDone;
@@ -34,6 +36,7 @@ namespace BloodMoon
         private readonly Dictionary<CharacterMainControl, Vector3> _groupAnchors = new Dictionary<CharacterMainControl, Vector3>();
         private float _bloodMoonStartTime = -1f;
         private float _bloodMoonDurationSec => ModConfig.Instance.ActiveHours * 3600f;
+        private System.TimeSpan _bloodMoonStartGameTime;
         
         private bool _bloodMoonActive;
         private float _strategyDecayTimer;
@@ -86,7 +89,9 @@ namespace BloodMoon
             _sceneSetupDone = false;
             _bloodMoonActive = false;
             _bloodMoonStartTime = -1f;
+            _bloodMoonStartGameTime = default;
             _processed.Clear();
+            _minionSpawned.Clear();
             _groupAnchors.Clear();
             _pointsCache.Clear();
             _charactersCache.Clear();
@@ -109,6 +114,16 @@ namespace BloodMoon
                     return;
                 }
 
+                // 血月期间每 15 秒重新禁用一次默认生成器：
+                // 多场景结构的 raid 会在玩家进入新区域时加载新子场景，新子场景的原版生成器
+                // 不在首次禁用范围内 → 会持续在玩家身边刷怪（无限刷的根因之一）
+                _recheckSpawnerTimer -= Time.deltaTime;
+                if (_recheckSpawnerTimer <= 0f)
+                {
+                    _recheckSpawnerTimer = 15f;
+                    if (ModConfig.Instance.DisableDefaultSpawners) DisableDefaultSpawner();
+                }
+
                 _weightCheckTimer -= Time.deltaTime;
                 if (_weightCheckTimer <= 0f)
                 {
@@ -123,8 +138,7 @@ namespace BloodMoon
                         }
                         else
                         {
-                            // 移除无效的引用
-                            _processed.Remove(c);
+                            if (c != null) _processed.Remove(c);
                         }
                     }
                 }
@@ -132,27 +146,20 @@ namespace BloodMoon
                 _scanCooldown -= Time.deltaTime;
                 if (_scanCooldown > 0f)
                 {
-                    return;
-                }
-                var player = CharacterMainControl.Main;
-                if (!_sceneSetupDone || _setupRunning)
-                {
-                    return;
-                }
-                
                 if (_scanCooldown > 0.9f)
                 {
-                     // 确保 _store 不为 null
                      if (_store != null)
                      {
                          _store.DecayAndPrune(Time.time, 120f);
                      }
-                     
-                     if (_pointsCache.Count == 0)
-                     {
-                        var spawners = UnityEngine.Object.FindObjectsOfType<RandomCharacterSpawner>();
-                        foreach (var s in spawners) { if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints); }
-                     }
+                }
+                    return;
+                }
+
+                var player = CharacterMainControl.Main;
+                if (!_sceneSetupDone || _setupRunning)
+                {
+                    return;
                 }
 
                 if (_store == null) return;
@@ -168,6 +175,8 @@ namespace BloodMoon
                     if (c == null || c.IsMainCharacter) continue;
                     
                     if (_processed.Contains(c)) continue;
+                    // 已刷过随从的 Boss 不再刷（配合 _processed 双保险，防"每秒新 Boss 每秒刷随从"的无限循环）
+                    if (_minionSpawned.Contains(c)) continue;
 
                     // 距离检查优化：距离玩家太远的角色不处理
                     if (hasPlayer && Vector3.SqrMagnitude(c.transform.position - playerPos) > 40000f) // 200m^2
@@ -188,6 +197,8 @@ namespace BloodMoon
                     EnableRevenge(c, player);
                     SpawnMinionsForBoss(c, c.transform.position, c.gameObject.scene.buildIndex).Forget();
                     _processed.Add(c);
+                    _minionSpawned.Add(c);
+                    BloodMoon.Utils.Logger.Log($"[BossManager] Enhanced existing boss: {c.name}");
                 }
                 
                 _scanCooldown = 1.0f;
@@ -272,7 +283,7 @@ namespace BloodMoon
             if (minionPresets.Count == 0) return;
 
             int count = ModConfig.Instance.BossMinionCount;
-            count = Mathf.Clamp(count, 3, 10); 
+            count = Mathf.Clamp(count, 1, 10); // 下限降到 1：尊重配置，避免至少 3 个随从的固定开销
 
             // 批量生成以减少每帧开销
             for (int i = 0; i < count; i++)
@@ -299,7 +310,17 @@ namespace BloodMoon
 
                  try
                  {
-                     var clone = await preset.CreateCharacterAsync(spawnPos, Vector3.forward, scene, null, false);
+                     var groupObj = new GameObject("BloodMoon_SpawnerGroup");
+                     var group = groupObj.AddComponent<CharacterSpawnerGroup>();
+                     CharacterMainControl clone = null!;
+                     try
+                     {
+                         clone = await preset.CreateCharacterAsync(spawnPos, Vector3.forward, scene, group, false);
+                     }
+                     finally
+                     {
+                         if (groupObj != null) UnityEngine.Object.Destroy(groupObj);
+                     }
                      if (clone != null)
                      {
                          // 减少等待时间
@@ -356,6 +377,7 @@ namespace BloodMoon
 
                         _processed.Add(clone);
                         _charactersCache.Add(clone);
+                        BloodMoon.Utils.Logger.Log($"[BossManager] Minion spawned: {clone.name}");
                      }
                  }
                  catch (System.Exception ex)
@@ -421,22 +443,65 @@ namespace BloodMoon
         }
 
         /// <summary>
-        /// 禁用默认生成器
+        /// 禁用默认生成器（覆盖全部生成器类型：根组件 + 独立 Spawner + 组生成器）
         /// </summary>
         private void DisableDefaultSpawner()
         {
-            var spawners = UnityEngine.Object.FindObjectsOfType<CharacterSpawnerRoot>();
-            if (spawners != null)
+            int count = 0;
+            count += DisableSpawnerType<CharacterSpawnerRoot>();
+            count += DisableSpawnerType<RandomCharacterSpawner>();
+            count += DisableSpawnerType<WaveCharacterSpawner>();
+            count += DisableSpawnerType<CharacterSpawnerGroup>();
+            count += DisableSpawnerType<CharacterSpawnerGroupSelector>();
+            if (count > 0)
+                BloodMoon.Utils.Logger.Log($"[BossManager] Disabled {count} default spawners.");
+        }
+
+        private int DisableSpawnerType<T>() where T : MonoBehaviour
+        {
+            int count = 0;
+            var spawners = UnityEngine.Object.FindObjectsOfType<T>();
+            if (spawners == null) return 0;
+            foreach (var s in spawners)
             {
-                foreach (var s in spawners)
+                if (s != null && s.gameObject.activeSelf)
                 {
-                    if (s.gameObject.activeSelf)
-                    {
-                        s.gameObject.SetActive(false);
-                        if (!_disabledSpawners.Contains(s)) _disabledSpawners.Add(s);
-                    }
+                    s.gameObject.SetActive(false);
+                    if (!_disabledSpawners.Contains(s)) _disabledSpawners.Add(s);
+                    count++;
                 }
             }
+            return count;
+        }
+
+        /// <summary>
+        /// 在玩家周围 [minDist, maxDist] 环带找导航网格可达点（Boss 生成无刷怪点时的兜底）
+        /// </summary>
+        private static Vector3? FindSpawnPosNearPlayer(CharacterMainControl player, float minDist, float maxDist)
+        {
+            if (player == null) return null;
+            for (int attempt = 0; attempt < 12; attempt++)
+            {
+                var offset = UnityEngine.Random.insideUnitCircle * UnityEngine.Random.Range(minDist, maxDist);
+                Vector3 candidate = player.transform.position + new Vector3(offset.x, 0f, offset.y);
+
+                if (AstarPath.active != null)
+                {
+                    var nn = Pathfinding.NNConstraint.Walkable;
+                    var node = AstarPath.active.GetNearest(candidate, nn).node;
+                    if (node != null && node.Walkable)
+                    {
+                        candidate = (Vector3)node.position;
+                        float dist = Vector3.Distance(candidate, player.transform.position);
+                        if (dist >= minDist) return candidate;
+                    }
+                }
+                else if (Physics.Raycast(candidate + Vector3.up * 5f, Vector3.down, out var hit, 10f, GameplayDataSettings.Layers.groundLayerMask))
+                {
+                    return hit.point;
+                }
+            }
+            return null;
         }
 
         /// <summary>
@@ -859,7 +924,8 @@ namespace BloodMoon
             
             if (!_setupRunning && !_sceneSetupDone) 
             {
-                 if (_bloodMoonActive && Time.time - _bloodMoonStartTime > _bloodMoonDurationSec)
+                 // 用游戏时钟判断血月是否已超时（之前误用 Time.time 现实秒，几乎永不触发）
+                 if (_bloodMoonActive && (GameClock.Now - _bloodMoonStartGameTime).TotalHours > ModConfig.Instance.ActiveHours)
                  {
                      ResetSession();
                  }
@@ -869,6 +935,7 @@ namespace BloodMoon
             _setupRunning = true;
 
             _bloodMoonStartTime = Time.time;
+            _bloodMoonStartGameTime = GameClock.Now;
             _bloodMoonActive = true;
             _strategyDecayTimer = 30f;
 
@@ -881,6 +948,9 @@ namespace BloodMoon
                 _pointsCache.Clear();
                 _disabledSpawners.Clear();
 
+                // 注意顺序：必须先收集刷怪点，再禁用生成器！
+                // （生成器被 SetActive(false) 后 FindObjectsOfType 找不到 → _pointsCache 为空
+                //  → Boss 锚点 fallback 到玩家脚下 → 敌人全刷在玩家身边）
                 var spawners = UnityEngine.Object.FindObjectsOfType<RandomCharacterSpawner>();
                 foreach (var s in spawners) 
                 {
@@ -895,11 +965,23 @@ namespace BloodMoon
                     if (s.spawnPoints != null) _pointsCache.Add(s.spawnPoints);
                 }
 
+                // 收集完成后才禁用生成器（血月期间不再刷怪）
+                if (ModConfig.Instance.DisableDefaultSpawners) DisableDefaultSpawner();
+
                 _charactersCache.Clear();
                 _charactersCache.AddRange(UnityEngine.Object.FindObjectsOfType<CharacterMainControl>());
                 try 
                 {
-                    if (CharacterMainControl.Main == null) await UniTask.WaitUntil(() => CharacterMainControl.Main != null);
+                    if (CharacterMainControl.Main == null)
+                    {
+                        // 带超时等待玩家角色：避免永久挂起导致血月内容永不生成
+                        float waitTimeout = 10f;
+                        while (CharacterMainControl.Main == null && waitTimeout > 0f)
+                        {
+                            await UniTask.Delay(500);
+                            waitTimeout -= 0.5f;
+                        }
+                    }
                     
                     var player = CharacterMainControl.Main;
                     if (player == null)
@@ -979,12 +1061,31 @@ namespace BloodMoon
                             
                             if (!found)
                             {
-                                if (player != null) anchor = player.transform.position;
+                                // 没有刷怪点可用时：在玩家周围 40-90m 找导航网格可达点。
+                                // 旧版直接 fallback 到玩家位置 → Boss 刷在玩家脚下（玩家身边刷怪的根因）
+                                var nearPos = FindSpawnPosNearPlayer(player, 40f, 90f);
+                                if (nearPos == null)
+                                {
+                                    BloodMoon.Utils.Logger.Warning("[BossManager] No valid spawn position for boss, skipping.");
+                                    continue;
+                                }
+                                anchor = nearPos.Value;
+                                targetScene = scene;
                             }
                             
                             try
                             {
-                                var clone = await preset.CreateCharacterAsync(anchor, Vector3.forward, targetScene, null, false);
+                                var groupObj = new GameObject("BloodMoon_SpawnerGroup");
+                                var group = groupObj.AddComponent<CharacterSpawnerGroup>();
+                                CharacterMainControl clone = null!;
+                                try
+                                {
+                                    clone = await preset.CreateCharacterAsync(anchor, Vector3.forward, targetScene, group, false);
+                                }
+                                finally
+                                {
+                                    if (groupObj != null) UnityEngine.Object.Destroy(groupObj);
+                                }
                                 if (clone != null)
                                 {
                                     await UniTask.Yield(PlayerLoopTiming.Update); 
@@ -1012,8 +1113,10 @@ namespace BloodMoon
                                     EnableRevenge(clone, player);
                                     SpawnMinionsForBoss(clone, anchor, targetScene).Forget();
                                     _processed.Add(clone);
+                                    _minionSpawned.Add(clone);
                                     _groupAnchors[clone] = anchor;
                                     _charactersCache.Add(clone);
+                                    BloodMoon.Utils.Logger.Log($"[BossManager] Boss spawned: {clone.name} at {clone.transform.position}");
                                 }
                             }
                             catch (System.Exception ex)

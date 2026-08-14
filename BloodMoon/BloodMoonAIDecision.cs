@@ -582,6 +582,8 @@ namespace BloodMoon
         public override float Evaluate(AIContext ctx)
         {
             if (ctx.Character == null) return 0f;
+            // 无目标时不撤退：旧版 Retreat 打分 0.95 但执行时直接 return → 残血敌人原地罚站
+            if (ctx.Target == null) return 0f;
             float hp = ctx.Character.Health.CurrentHealth / ctx.Character.Health.MaxHealth;
             
             // Boss不会轻易撤退

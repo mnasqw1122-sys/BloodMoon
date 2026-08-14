@@ -32,5 +32,6 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <None Include="info.ini" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
