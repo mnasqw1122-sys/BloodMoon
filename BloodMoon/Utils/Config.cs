@@ -12,38 +12,38 @@ namespace BloodMoon.Utils
         // ==========================================
         
         /// <summary>
-        /// 血月休眠时间（小时）- 两次血月之间的间隔
+        /// 血月休眠时间（小时）- 两次血月之间的间隔（72h ≈ 72 真实分钟 @60x 流速）
         /// </summary>
-        public float SleepHours = 160f;
+        public float SleepHours = 72f;
         
         /// <summary>
-        /// 血月持续时间（小时）- 血月每次激活的时长
+        /// 血月持续时间（小时）- 血月每次激活的时长（24h ≈ 24 真实分钟）
         /// </summary>
-        public float ActiveHours = 48f;
+        public float ActiveHours = 24f;
         
         // ==========================================
         // Boss设置
         // ==========================================
         
         /// <summary>
-        /// Boss数量 - 每次血月生成的Boss数量（1-5）
+        /// Boss数量 - 每次血月生成的Boss数量（1-5，默认 2 保持可控）
         /// </summary>
-        public int BossCount = 5;
+        public int BossCount = 2;
         
         /// <summary>
-        /// 每个Boss的随从数量 - 每个Boss带多少个小弟（3-10）
+        /// 每个Boss的随从数量 - 每个Boss带多少个小弟（1-10）
         /// </summary>
-        public int BossMinionCount = 5;
+        public int BossMinionCount = 3;
         
         /// <summary>
         /// Boss生命值倍数 - 相对于基础Boss的生命值倍率
         /// </summary>
-        public float BossHealthMultiplier = 5.0f;
+        public float BossHealthMultiplier = 3.0f;
         
         /// <summary>
         /// 随从生命值倍数 - 相对于普通敌人的生命值倍率
         /// </summary>
-        public float MinionHealthMultiplier = 2.0f;
+        public float MinionHealthMultiplier = 1.8f;
         
         /// <summary>
         /// Boss头部护甲 - Boss的头部护甲值

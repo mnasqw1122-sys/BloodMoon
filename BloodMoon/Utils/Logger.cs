@@ -9,6 +9,10 @@ namespace BloodMoon.Utils
         public static string ModDirectory { get; private set; } = string.Empty;
         private static string _logPath = string.Empty;
         private static bool _initialized;
+        private static System.Collections.Concurrent.ConcurrentQueue<string> _logQueue = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        private static StreamWriter? _writer;
+        private static float _lastFlushTime = -1f;
+        private const float FlushInterval = 1f;
 
         /// <summary>
         /// 初始化日志系统
@@ -20,10 +24,11 @@ namespace BloodMoon.Utils
             _logPath = Path.Combine(modDirectory, "BloodMoon.log");
             _initialized = true;
             
-            // 启动时重置日志文件
             try
             {
-                File.WriteAllText(_logPath, $"[BloodMoon] Log Started at {DateTime.Now}\n");
+                _writer = new StreamWriter(_logPath, false);
+                _writer.WriteLine($"[BloodMoon] Log Started at {DateTime.Now}");
+                _writer.Flush();
             }
             catch (Exception ex)
             {
@@ -74,23 +79,46 @@ namespace BloodMoon.Utils
         }
 
         /// <summary>
+        /// 刷新日志缓冲区到磁盘
+        /// </summary>
+        public static void Flush()
+        {
+            try
+            {
+                while (_logQueue.TryDequeue(out var msg))
+                {
+                    _writer?.WriteLine(msg);
+                }
+                _writer?.Flush();
+            }
+            catch { }
+        }
+
+        /// <summary>
         /// 将日志消息写入文件
         /// </summary>
         /// <param name="message">要写入的消息</param>
         private static void WriteToFile(string message)
         {
             if (!_initialized) return;
-            try
+            var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
+            _logQueue.Enqueue(line);
+            // 批量落盘：避免每条日志同步磁盘 IO（错误风暴时拖慢游戏）
+            if (Time.realtimeSinceStartup - _lastFlushTime >= FlushInterval)
             {
-                using (StreamWriter writer = File.AppendText(_logPath))
-                {
-                    writer.WriteLine($"[{DateTime.Now:HH:mm:ss}] {message}");
-                }
+                Flush();
             }
-            catch
-            {
-                // 忽略文件写入错误以避免无限循环
-            }
+        }
+
+        /// <summary>
+        /// 关闭日志系统
+        /// </summary>
+        public static void Shutdown()
+        {
+            Flush();
+            _writer?.Close();
+            _writer = null;
+            _initialized = false;
         }
     }
 }
