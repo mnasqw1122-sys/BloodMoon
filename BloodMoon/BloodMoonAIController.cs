@@ -33,7 +33,6 @@ namespace BloodMoon
         private AIContext _context = new AIContext();
         private List<AIAction> _actions = new List<AIAction>();
         private AIAction? _currentAction;
-        private NeuralDecisionMaker _neuralBrain = null!;
         private StableBehaviorSystem _behaviorSystem = null!;
         private float _globalCooldown = 0f;
         private Dictionary<string, float> _actionSwitchCooldowns = new Dictionary<string, float>();
@@ -41,17 +40,47 @@ namespace BloodMoon
         private async UniTaskVoid FindWeaponsAsync()
         {
             if (_c == null) return;
-            var set = await ComprehensiveWeaponSystem.Instance.FindWeaponsForAI(_c);
-            if (set == null) return;
-            // 旧版丢弃 WeaponSet 结果 → 敌人从不掏枪。拿到武器后主动切换：
-            if (set.PrimaryWeapon != null || set.SecondaryWeapon != null)
+
+            // 修复 P1-1：这是 AI 唯一的持枪途径，原先只跑一次且失败后永不重试
+            // （首次调用时武器管理器可能还没初始化完 → 敌人永久空手）。
+            // 现在最多尝试 3 次，并在每次 await 之后做 Unity 空检查（对象可能在等待期间被销毁）。
+            const int maxAttempts = 3;
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
             {
-                _c.SwitchToWeapon(0);
+                if (this == null || _c == null) return;
+
+                BloodMoon.AI.WeaponSet? set = null;
+                try
+                {
+                    set = await ComprehensiveWeaponSystem.Instance.FindWeaponsForAI(_c);
+                }
+                catch (System.Exception e)
+                {
+                    Utils.Logger.Warning($"[AI] FindWeaponsForAI failed (attempt {attempt}/{maxAttempts}): {e.Message}");
+                }
+
+                // await 之后 _c 可能已经是"Unity 假 null"（角色已销毁）
+                if (this == null || _c == null) return;
+
+                if (set != null && !set.IsEmpty)
+                {
+                    // 旧版丢弃 WeaponSet 结果 → 敌人从不掏枪。拿到武器后主动切换：
+                    if (set.PrimaryWeapon != null || set.SecondaryWeapon != null)
+                    {
+                        _c.SwitchToWeapon(0);
+                    }
+                    else if (set.MeleeWeapon != null)
+                    {
+                        _c.SwitchToWeapon(-1);
+                    }
+                    return;
+                }
+
+                await UniTask.Delay(1000 * attempt, cancellationToken: this.GetCancellationTokenOnDestroy());
+                if (this == null || _c == null) return;
             }
-            else if (set.MeleeWeapon != null)
-            {
-                _c.SwitchToWeapon(-1);
-            }
+
+            Utils.Logger.Warning($"[AI {(_c != null ? _c.name : "?")}] No weapons obtained after {maxAttempts} attempts");
         }
         
         // --- 移动和路径查找 ---
@@ -71,6 +100,10 @@ namespace BloodMoon
         private float _stuckTimer;
         private float _lastPathRequestTime; // 上次路径请求时间
         private const float MIN_PATH_REQUEST_INTERVAL = 0.5f; // 最小路径请求间隔（秒）
+        private int _pathFailCount;            // 限频统计：累计寻路失败次数
+        private float _lastPathFailLogTime;    // 限频统计：上次输出失败日志的时间
+        private Vector3 _failedPathPos;        // 最近一次寻路失败的目标点
+        private float _failedPathUntil;        // 该目标点在此时刻之前不再重试
         
         // --- 战斗状态 ---
         private float _shootTimer;
@@ -81,7 +114,6 @@ namespace BloodMoon
         private float _dashCooldown;
         private bool _hurtRecently;
         private float _skillCooldown;
-        private float _fireHoldTimer;
         private float _pressureScore;
         private float _chaseDelayTimer;
         private bool _canChase = true;
@@ -92,8 +124,8 @@ namespace BloodMoon
         public bool IsHealing => _healWaitTimer > 0f;
 
         // --- 协作 ---
-        private CharacterMainControl? _leader;
-        private int _wingIndex = -1;
+        // P2 清理：原来的 _leader / _wingIndex 只有 SetWingAssignment 写入、全仓无人读取
+        // （整套"翼位"设计从未生效），已连同该方法一起移除。
         public bool IsBoss;
 
         public CharacterMainControl? CurrentTarget => _context.Target; // 暴露给SquadManager使用
@@ -105,26 +137,18 @@ namespace BloodMoon
             _canChase = _chaseDelayTimer <= 0f;
         }
 
-        public void SetWingAssignment(CharacterMainControl leader, int index)
-        {
-            _leader = leader;
-            _wingIndex = index;
-        }
-
-        private Squad? _currentSquad;
+        /// <summary>
+        /// 入队/离队通知。P2 清理：原先还保存 _currentSquad 字段但全仓无人读取，
+        /// 现在只保留真正被消费的副作用（清空当前战术订单，等 SquadManager 重新下发）。
+        /// </summary>
         public void SetSquad(Squad? squad)
         {
-            _currentSquad = squad;
-            // 订单由 SquadManager 每 0.5s 周期推送（SetTacticalOrder），组队瞬间订单为空是正常的
             if (_context != null) _context.SquadOrder = string.Empty;
         }
 
-        private static readonly List<BloodMoonAIController> _all = new List<BloodMoonAIController>();
-        public static List<BloodMoonAIController> AllControllers => _all;
+        // P2 清理：删掉了 _all / AllControllers（静态列表只被自己增删、无人读取）、
+        // HasWeapon 与 GetHealthPercentage()（各只有声明、无调用者）。
 
-        public bool HasWeapon => _c != null && (_c.PrimWeaponSlot()?.Content != null || _c.SecWeaponSlot()?.Content != null || _c.MeleeWeaponSlot()?.Content != null);
-        public float GetHealthPercentage() => _c != null ? _c.Health.CurrentHealth / _c.Health.MaxHealth : 0f;
-        
         public void SetTacticalOrder(string order)
         {
             if (_context != null) _context.SquadOrder = order;
@@ -155,11 +179,10 @@ namespace BloodMoon
             
             var vanilla = c.GetComponent<AICharacterController>();
             if (vanilla != null) vanilla.enabled = false;
+            _vanillaAI = vanilla;   // 缓存引用，避免每帧 GetComponent（P1-5）
             
             _c.Health.OnHurtEvent.AddListener(OnHurt);
             _c.Health.OnDeadEvent.AddListener(OnDeadAI);
-            
-            if (!_all.Contains(this)) _all.Add(this);
             
             // 初始化上下文
             _context.Character = _c;
@@ -173,10 +196,11 @@ namespace BloodMoon
             else if (_context.Personality.Caution > 0.7f) Role = AIRole.Sniper;
             else Role = AIRole.Standard;
 
-            // 调试日志人格
-            #if DEBUG
-            Utils.Logger.Debug($"[AI {_c.name}] Created with Personality: {_context.Personality} | Role: {Role}");
-            #endif
+            // 调试日志人格（P2 清理：改用运行时开关 EnableDebugLogging）
+            if (Utils.ModConfig.Instance.EnableDebugLogging)
+            {
+                Utils.Logger.Debug($"[AI {_c.name}] Created with Personality: {_context.Personality} | Role: {Role}");
+            }
             
             // 初始化操作
             _actions.Add(new Action_Unstuck());
@@ -195,10 +219,6 @@ namespace BloodMoon
             _actions.Add(new Action_Patrol());
             _actions.Add(new Action_Panic());
 
-            // 初始化神经脑（仅保留基类：ContextAware 会读取从未赋值的上下文把武器动作分数清零）
-            var actionNames = _actions.Select(a => a.Name).ToList();
-            _neuralBrain = new NeuralDecisionMaker(actionNames);
-
             // 初始化行为系统
             _behaviorSystem = new StableBehaviorSystem();
             _behaviorSystem.Initialize();
@@ -211,6 +231,12 @@ namespace BloodMoon
             {
                 IsBoss = true;
             }
+
+            // 受击体体检与修复：玩家反馈"风暴机器人打不动、子弹直接穿过去"。
+            // 子弹只有在命中 "DamageReceiver" 层上的 DamageReceiver 碰撞体时才会结算伤害，
+            // 而大型 Boss 的受击胶囊是按头盔插槽定尺寸的（没有插槽就保持 prefab 的小尺寸）。
+            // Init 时先修一次（此时模型已就绪），第一个 tick 再补一次（模型可能延后装配）。
+            Utils.HitboxFix.Apply(c, "Init");
             
             // 随机化时钟偏移以分散CPU负载
             _aiTickTimer = Random.Range(0f, AI_TICK_INTERVAL);
@@ -220,6 +246,14 @@ namespace BloodMoon
 
         private float _aiTickTimer;
         private const float AI_TICK_INTERVAL = 0.1f;
+        /// <summary>受击体是否已经做过第二遍（模型延后装配时补修）修复</summary>
+        private bool _hitboxRecheckDone;
+        /// <summary>原版 AI 控制器缓存（P1-5）</summary>
+        private AICharacterController? _vanillaAI;
+        /// <summary>装填封锁截止时间（P0-10）：BeginReload() 失败后一段时间内不再选择 Reload</summary>
+        private float _reloadBlockedUntil;
+        /// <summary>当前是否处于装填封锁期</summary>
+        public bool IsReloadBlocked => Time.time < _reloadBlockedUntil;
 
         private void Update()
         {
@@ -229,11 +263,18 @@ namespace BloodMoon
                 return;
             }
             
-            // 保障：确保基础AI功能保持禁用状态
-            var vanilla = _c.GetComponent<AICharacterController>();
-            if (vanilla != null && vanilla.enabled) vanilla.enabled = false;
+            // 保障：确保基础AI功能保持禁用状态（引用已在 Init 缓存，不再每帧 GetComponent）
+            if (_vanillaAI != null && _vanillaAI.enabled) _vanillaAI.enabled = false;
 
             _aliveTime += Time.deltaTime;
+
+            // 受击体第二遍修复：模型/插槽可能是 Init 之后才装配完成的（例如大型机器人 Boss），
+            // 这时再量一次包围盒，必要时把受击胶囊撑大，避免"子弹从模型旁边穿过去"。
+            if (!_hitboxRecheckDone && _aliveTime > 2f)
+            {
+                _hitboxRecheckDone = true;
+                Utils.HitboxFix.Apply(_c, "late");
+            }
 
             // 难度接线：每 5s 把伤害乘数同步到枪械伤害 stat（旧版 DamageMultiplier 算了没人读）
             _dmgSyncTimer += Time.deltaTime;
@@ -275,9 +316,11 @@ namespace BloodMoon
                     // 具有行为持久性的决策逻辑
                     AIAction? bestAction = null;
                     float bestScore = -1f;
-                    
-                    // 获取神经网络分数（实验性）
-                    var neuralScores = _neuralBrain.GetActionScores(_context);
+
+                    // 决策：纯规则评分。
+                    // 修复 P1-4：神经网络权重随机初始化且从未训练，混入只会注入噪声，
+                    // 因此这里彻底不调用前向传播 —— 省掉每 0.1s/每 AI 的一整套数组/字典分配
+                    // （30 个 AI ≈ 2000+ 次/秒无用分配，结果原本也会被 0 权重丢弃）。
 
                     Dictionary<string, float> allScores = new Dictionary<string, float>();
 
@@ -298,15 +341,7 @@ namespace BloodMoon
                             var diff = AdaptiveDifficulty.Instance;
                             if (diff != null) score *= diff.AggressionMultiplier;
                         }
-                        
-                        // 决策：纯规则评分。神经网络权重是随机初始化且从未训练，
-                        // 混入只会注入随机噪声（旧版 10%~40% 导致 AI 行为发疯）
-                        float neuralWeight = 0f;
-                        if (neuralScores.TryGetValue(action.Name, out float nScore))
-                        {
-                            score = score * (1f - neuralWeight) + nScore * neuralWeight;
-                        }
-                        
+
                         allScores[action.Name] = score;
 
                         if (score > bestScore)
@@ -381,7 +416,6 @@ namespace BloodMoon
             _coverCooldown -= Time.deltaTime;
             _dashCooldown -= Time.deltaTime;
             _skillCooldown -= Time.deltaTime;
-            _fireHoldTimer -= Time.deltaTime;
             _globalCooldown -= Time.deltaTime;
             _pressureScore = Mathf.Max(0f, _pressureScore - Time.deltaTime * 0.5f);
             
@@ -485,6 +519,10 @@ namespace BloodMoon
                      _c.SetSkill(SkillTypes.itemSkill, ss.Skill, ss.Skill.gameObject);
                      if(_c.StartSkillAim(SkillTypes.itemSkill)) {
                          _c.ReleaseSkill(SkillTypes.itemSkill);
+                         // 修复 P0-11：释放完技能/投掷物后必须切回可用武器，
+                         // 否则 AI 会一直握着投掷物不再开枪（对齐游戏原生
+                         // ReleaseItemSkillIfHas.OnStop(): CancleSkill() + SwitchToFirstAvailableWeapon()）
+                         _c.SwitchToFirstAvailableWeapon();
                          return true;
                      }
                 }
@@ -658,9 +696,18 @@ namespace BloodMoon
             var gun = _c.GetGun();
             if (gun != null && !gun.IsReloading())
             {
-                // 智能重载逻辑（最佳弹药）
-                // 目前简化处理，仅重新加载
-                gun.BeginReload();
+                // 修复 P0-10：BeginReload() 在"背包里没有该口径子弹"时返回 false 且不改变任何状态
+                // （ItemAgent_Gun.cs:1259-1295）。原实现丢弃返回值 → Action_Reload 恒得 0.92 分，
+                // AI 会永远举着空枪"假装装填"。失败后封锁装填若干秒，让 Engage/Retreat 等动作接管。
+                bool started = gun.BeginReload();
+                if (!started)
+                {
+                    _reloadBlockedUntil = Time.time + 4f;
+                    if (ModConfig.Instance.EnableDebugLogging)
+                    {
+                        BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Reload blocked (no matching ammo in inventory)");
+                    }
+                }
             }
             
             // 移动至掩体后重新装填
@@ -735,7 +782,10 @@ namespace BloodMoon
 
             var gun = _c.GetGun();
             bool isSniper = gun != null && gun.BulletDistance > 80f; // 启发式判断
-            bool isShotgun = gun != null && gun.BulletCount < 10 && gun.BulletDistance < 20f; // 启发式判断
+            // 修复 P1-9：判断霰弹枪不能用 BulletCount（那是**当前弹匣余弹**，
+            // ItemSetting_Gun.cs 在装填中还返回 -1），弹匣打空的步枪会被误判成霰弹枪
+            // → 触发激进推进/贴脸，属于送死行为。正确字段是 ShotCount（每次击发的弹丸数）。
+            bool isShotgun = gun != null && gun.ShotCount > 1; // 启发式判断
             
             Vector3 aimPos = PredictAim(_context.Target);
             
@@ -1173,6 +1223,9 @@ namespace BloodMoon
                     _doorStuckTimer = 0f;
                     _repathTimer = -1f; 
                     _waitingForPath = false; 
+                    // 修复 P0-1：把卡住的位置写进 AIDataStore 的持久化记忆
+                    // （MarkStuckSpot 原先全仓无调用点 → stuckSpots 恒为 []，跨场景记忆形同虚设）
+                    _store?.MarkStuckSpot(_c.transform.position);
                     // 返回零向量：停止移动，交给 Unstuck 动作处理。
                     // 旧版朝远离目标方向移动会原地乱跑/穿墙
                     return Vector3.zero;
@@ -1195,10 +1248,17 @@ namespace BloodMoon
             // 优化的路径查找频率并进行多次检查
             if (_path == null || _path.vectorPath == null || _path.vectorPath.Count == 0 || _path.error)
             {
-                shouldRepath = true;
-                if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                // 修复：寻路失败后 OnPathComplete 会把 _path 置空，而这里原来**无条件** shouldRepath=true，
+                // 于是 _repathTimer=5s 的冷却被完全绕过，只剩 MIN_PATH_REQUEST_INTERVAL(0.5s) 兜底
+                // → 每个 AI 每 0.5 秒重试一次注定失败的寻路（实机 365 条 "Path failed xN in Ns" 就是这么来的）。
+                // 现在失败后必须等冷却结束才允许重试。
+                if (_repathTimer <= 0f)
                 {
-                    BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Path invalid, requesting repath");
+                    shouldRepath = true;
+                    if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                    {
+                        BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Path invalid, requesting repath");
+                    }
                 }
             }
             else if (_repathTimer <= 0f)
@@ -1242,7 +1302,35 @@ namespace BloodMoon
                     }
                     return (targetPos - _c.transform.position).normalized;
                 }
-                
+
+                // 优化：目标点根本不在导航图上时不要发起寻路。
+                // 实机日志里 233 条 "[AI] Path failed: Couldn't find a node close to the end point"
+                // 全部来自这里——A* 明明找不到落点，却仍要为每个 AI 每 0.5s 排一次寻路作业，
+                // 既浪费 CPU 又刷爆日志。先做一次廉价的最近节点检查，不可达就直接走直线回退。
+                if (!IsPointOnGraph(targetPos, out float snapDistance))
+                {
+                    _lastPathRequestTime = Time.time;
+                    _repathTimer = 2.0f;
+                    if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                    {
+                        BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Target off navmesh (snap {snapDistance:F1}m), using fallback movement");
+                    }
+                    return (targetPos - _c.transform.position).normalized;
+                }
+
+                // 修复：记住"刚刚对这个位置寻路失败过"，15 秒内不再对同一片区域重复发起寻路。
+                // 预检查过得了、真正寻路却失败的情况确实存在（落点约束比最近节点查询更严格），
+                // 靠这条记忆兜住，避免反复排队失败作业。
+                if (Time.time < _failedPathUntil && Vector3.Distance(targetPos, _failedPathPos) < 3f)
+                {
+                    _repathTimer = 1.0f;
+                    if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                    {
+                        BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Skip repath: same destination failed recently");
+                    }
+                    return (targetPos - _c.transform.position).normalized;
+                }
+
                 // 性能优化：简单的并发路径查找限制
                 // 移除RuntimeMonitor依赖，使用简化版本
                 // 可以在这里添加简单的并发控制逻辑，如果需要的话
@@ -1368,56 +1456,8 @@ namespace BloodMoon
             return dirToWaypoint;
         }
         
-        // 检查目标位置是否适用于路径寻找
-        private bool IsValidTargetPosition(Vector3 pos)
-        {
-            // 检查位置是否在地面上
-            if (!Physics.Raycast(pos + Vector3.up * 5f, Vector3.down, out var hit, 10f, GameplayDataSettings.Layers.groundLayerMask))
-            {
-                return false;
-            }
-            
-            // 检查位置是否与当前位置过于遥远
-            if (Vector3.Distance(_c.transform.position, pos) > 100f)
-            {
-                return false;
-            }
-            
-            // 检查位置是否可访问（从上方进行简单的射线检测）
-            var mask = GameplayDataSettings.Layers.wallLayerMask | GameplayDataSettings.Layers.halfObsticleLayer;
-            if (Physics.Raycast(pos + Vector3.up * 5f, Vector3.down, 10f, mask))
-            {
-                return false;
-            }
-            
-            return true;
-        }
-        
-        // 当目标无效时，查找附近的有效位置
-        private Vector3 FindNearbyValidPosition(Vector3 originalPos)
-        {
-            // 尝试在原始位置周围以螺旋模式找到一个有效位置
-            for (int i = 1; i <= 5; i++)
-            {
-                float radius = i * 5f;
-                int steps = i * 8;
-                
-                for (int j = 0; j < steps; j++)
-                {
-                    float angle = (float)j / steps * Mathf.PI * 2;
-                    Vector3 offset = new Vector3(Mathf.Cos(angle), 0, Mathf.Sin(angle)) * radius;
-                    Vector3 candidate = originalPos + offset;
-                    
-                    if (IsValidTargetPosition(candidate))
-                    {
-                        return candidate;
-                    }
-                }
-            }
-            
-            // 若未找到有效邻近位置，则回退到当前位置
-            return _c.transform.position + (_c.transform.forward * 5f);
-        }
+        // P2 清理：删掉了 IsValidTargetPosition / FindNearbyValidPosition
+        // （两者构成一条封闭的调用链，全仓没有任何外部调用者）。
 
         private void OnPathComplete(Path p)
         {
@@ -1425,15 +1465,28 @@ namespace BloodMoon
             {
                 _path = p;
                 _currentWaypoint = 0;
+                _pathFailCount = 0;
                 BloodMoon.Utils.Logger.Debug($"[AI {_c.name}] Path completed successfully, waypoints: {p.vectorPath?.Count ?? 0}");
             }
             else
             {
-                BloodMoon.Utils.Logger.Warning($"[AI {_c.name}] Path failed: {p.errorLog}");
+                // 限频：失败日志每 15 秒最多一条，并带上累计次数（实机曾出现 75 秒 233 条、
+                // 以及 365 条的刷屏，每条都要写文件 + Unity 日志，本身就会拖慢帧率）
+                _pathFailCount++;
+                if (Time.time - _lastPathFailLogTime > 15f)
+                {
+                    BloodMoon.Utils.Logger.Warning($"[AI {_c.name}] Path failed x{_pathFailCount} in {Time.time - _lastPathFailLogTime:F0}s: {p.errorLog}");
+                    _lastPathFailLogTime = Time.time;
+                    _pathFailCount = 0;
+                }
+
+                // 记住失败落点，短时间内不要对同一片区域重复发起寻路
+                _failedPathPos = _lastPathTarget;
+                _failedPathUntil = Time.time + 15f;
                 
                 // 路径查找失败的回退机制
                 // 如果错误是"Couldn't find a node close to the end point"，尝试使用备用目标位置
-                if (p.errorLog.Contains("Couldn't find a node close to the end point"))
+                if (p.errorLog != null && p.errorLog.Contains("Couldn't find a node close to the end point"))
                 {
                     // 记录失败的目标位置
                     if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
@@ -1450,6 +1503,29 @@ namespace BloodMoon
                 }
             }
             _waitingForPath = false;
+        }
+
+        /// <summary>
+        /// 判断一个点是否落在 A* 导航图的可行走区域内（落点吸附距离不超过 tolerance 米）。
+        /// 没有导航图时返回 true，保持原有行为不变。
+        /// </summary>
+        private static bool IsPointOnGraph(Vector3 pos, out float snapDistance, float tolerance = 2.0f)
+        {
+            snapDistance = float.MaxValue;
+            var astar = AstarPath.active;
+            if (astar == null) return true;
+
+            try
+            {
+                var nearest = astar.GetNearest(pos, Pathfinding.NNConstraint.Walkable);
+                if (nearest.node == null) return false;
+                snapDistance = Vector3.Distance(nearest.position, pos);
+                return snapDistance <= tolerance;
+            }
+            catch (System.Exception)
+            {
+                return true;   // 查询异常时不要阻断寻路
+            }
         }
         
         private bool FindCover(CharacterMainControl player, out Vector3 coverPos)
@@ -1659,6 +1735,8 @@ namespace BloodMoon
                      _c.SetSkill(SkillTypes.itemSkill, ss.Skill, ss.Skill.gameObject);
                      if(_c.StartSkillAim(SkillTypes.itemSkill)) {
                          _c.ReleaseSkill(SkillTypes.itemSkill);
+                         // 修复 P0-11：技能用完后切回武器（原版行为见 ReleaseItemSkillIfHas.cs:101-105）
+                         _c.SwitchToFirstAvailableWeapon();
                          _skillCooldown = 20f; // 旧版 8s 太频繁
                          return;
                      }
@@ -1724,14 +1802,7 @@ namespace BloodMoon
         
         private void OnDeadAI(DamageInfo dmg)
         {
-            if (_neuralBrain != null)
-            {
-                _neuralBrain.ReportPerformance(_aliveTime, 0, 0); 
-            }
-
             if (SquadManager.Instance != null) SquadManager.Instance.UnregisterAI(this);
-            
-            _all.Remove(this);
 
             // 只有玩家击杀才计入难度（旧版无条件调用：AI 互杀/摔死也会抬高难度）
             if (dmg.fromCharacter != null && dmg.fromCharacter.IsMainCharacter)
@@ -1781,7 +1852,7 @@ namespace BloodMoon
                     if (_currentAction != null)
                     {
                         string actionName = _currentAction.Name;
-                        isExecutingStationaryAction = actionName == "Suppression" || actionName == "Engage" || actionName == "Heal";
+                        isExecutingStationaryAction = actionName == "Suppress" || actionName == "Engage" || actionName == "Heal";
                     }
                     
                     // 执行静止动作时，不要标记为卡住
@@ -1791,7 +1862,23 @@ namespace BloodMoon
                         
                         // 智能解锁方向：尝试不同角度而非仅90度
                         float randomAngle = Random.Range(45f, 135f) * (Random.value > 0.5f ? 1f : -1f);
-                        return Quaternion.AngleAxis(randomAngle, Vector3.up) * desired;
+                        Vector3 escape = Quaternion.AngleAxis(randomAngle, Vector3.up) * desired;
+
+                        // P2 接线：如果当前位置本来就是历史上记录过的卡点，说明随机侧移往往还会被
+                        // 同一处地形吃掉，改为直接背离卡点中心脱离。这是 AIDataStore 跨场景卡点
+                        // 记忆（stuckSpots）唯一有实际作用的消费点 —— 此前 IsStuckSpot 全仓无调用，
+                        // 记忆只写不读。
+                        Vector3 stuckCenter;
+                        if (TryGetNearbyStuckSpot(pos, 1.5f, out stuckCenter))
+                        {
+                            Vector3 away = pos - stuckCenter;
+                            away.y = 0f;
+                            if (away.sqrMagnitude > 0.0001f)
+                            {
+                                escape = away.normalized * desired.magnitude;
+                            }
+                        }
+                        return escape;
                     }
                 }
             }
@@ -1804,6 +1891,30 @@ namespace BloodMoon
             return desired;
         }
         
+        /// <summary>
+        /// 查询附近是否有 AIDataStore 记录过的卡点，并返回该卡点中心。
+        /// 命中判定复用 <see cref="AIDataStore.IsStuckSpot"/>（单一事实来源），
+        /// 这里额外给出"往哪边躲"——让 AI 能背离卡点中心脱离。
+        /// </summary>
+        private bool TryGetNearbyStuckSpot(Vector3 pos, float threshold, out Vector3 center)
+        {
+            center = Vector3.zero;
+            if (_store == null || _store.StuckSpots == null) return false;
+            if (!_store.IsStuckSpot(pos, threshold)) return false;
+
+            float sqrThresh = threshold * threshold;
+            var spots = _store.StuckSpots;
+            for (int i = 0; i < spots.Count; i++)
+            {
+                if ((spots[i] - pos).sqrMagnitude <= sqrThresh)
+                {
+                    center = spots[i];
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private float _doorCooldown;
         private void TryOpenDoorAhead(Vector3 desired)
         {
@@ -1959,7 +2070,6 @@ namespace BloodMoon
                 _c.Health.OnDeadEvent.RemoveListener(OnDeadAI);
             }
             if (SquadManager.Instance != null) SquadManager.Instance.UnregisterAI(this);
-            _all.Remove(this);
         }
     }
 }

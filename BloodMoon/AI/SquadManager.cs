@@ -168,16 +168,5 @@ namespace BloodMoon.AI
             }
         }
 
-        public Squad? GetSquadForAI(BloodMoonAIController ai)
-        {
-            foreach (var squad in _squads)
-            {
-                if (squad.Members.Contains(ai))
-                {
-                    return squad;
-                }
-            }
-            return null;
-        }
     }
 }

@@ -6,62 +6,52 @@ using UnityEngine.SceneManagement;
 using Duckov;
 using Duckov.Utilities;
 using System.IO;
+using BloodMoon.Utils;
+using Logger = BloodMoon.Utils.Logger;   // 消歧：UnityEngine 也有一个 Logger 类型
 
 namespace BloodMoon
 {
+    // ============================================================================
+    // 结构体必须放在命名空间顶层：Unity 的 JsonUtility **不会序列化 List<自定义结构体>**
+    // （把结构体嵌套在类里也一样），实机自检日志 mapDangerSerialized=False 是证据。
+    // 因此 DTO 里用平行列表打包（见 MapSaveData）。
+    // ============================================================================
+
+    /// <summary>危险事件（危险热力图的一个采样点）</summary>
+    [Serializable]
+    public struct DangerEvent
+    {
+        public Vector3 pos;
+        public float time;
+        public float weight;
+    }
+
+
     /// <summary>
     /// AI数据存储类，负责存储和加载AI的战术数据、危险记忆等
     /// </summary>
     [Serializable]
     public class AIDataStore
     {
-        /// <summary>
-        /// 全局数据（智商/战术）- 在所有地图间共享
-        /// </summary>
-        [Serializable]
-        private class GlobalSaveData
-        {
-            public float avgPlayerSpeed = 3.0f;
-            public List<ApproachStat> approachStats = new List<ApproachStat>();
-            public List<KeyWeight> strategyWeights = new List<KeyWeight>();
-            public List<LeaderPref> leaderPrefs = new List<LeaderPref>();
-
-            /// <summary>
-            /// 从存储对象中读取数据
-            /// </summary>
-            /// <param name="s">数据存储对象</param>
-            public void FromStore(AIDataStore s)
-            {
-                avgPlayerSpeed = s._avgPlayerSpeed;
-                approachStats = s.ApproachStats;
-                strategyWeights = s.StrategyWeights;
-                leaderPrefs = s.LeaderPrefs;
-            }
-
-            /// <summary>
-            /// 将数据写入存储对象
-            /// </summary>
-            /// <param name="s">数据存储对象</param>
-            public void ToStore(AIDataStore s)
-            {
-                s._avgPlayerSpeed = avgPlayerSpeed;
-                if (approachStats != null) s.ApproachStats = approachStats;
-                if (strategyWeights != null) s.StrategyWeights = strategyWeights;
-                if (leaderPrefs != null) s.LeaderPrefs = leaderPrefs;
-            }
-        }
 
         /// <summary>
-        /// 地图特定数据（记忆/危险）- 每个地图单独
+        /// 地图特定数据（记忆/危险）- 每个地图单独。
+        /// 注意：Unity 的 JsonUtility **不会序列化 `List&lt;自定义结构体&gt;`**，所以危险事件用
+        /// 三个平行列表（`dangerPos`/`dangerTime`/`dangerWeight`）打包，而不是 `List&lt;DangerEvent&gt;`。
         /// </summary>
         [Serializable]
         private class MapSaveData
         {
-            public List<Vector3> playerAmbushSpots = new List<Vector3>();
             public List<Vector3> stuckSpots = new List<Vector3>();
             public Vector3 lastKnownPlayerPos;
-            public int reloadCount;
             public int deathCount;
+            // 修复 P0-2：危险热力图与"最后见到玩家"必须落盘，否则每次存读档都被清零，
+            // 而它们正是侧翼选点(Action_Flank)/掩体评分(TryGetKnownCover)的关键输入。
+            public List<Vector3> dangerPos = new List<Vector3>();
+            public List<float> dangerTime = new List<float>();
+            public List<float> dangerWeight = new List<float>();
+            public float lastSeenTime;
+            public float lastDeathTime;
 
             /// <summary>
             /// 从存储对象中读取地图数据
@@ -69,11 +59,23 @@ namespace BloodMoon
             /// <param name="s">数据存储对象</param>
             public void FromStore(AIDataStore s)
             {
-                playerAmbushSpots = s.PlayerAmbushSpots;
                 stuckSpots = s.StuckSpots;
                 lastKnownPlayerPos = s.LastKnownPlayerPos;
-                reloadCount = s._reloadCount;
                 deathCount = s.DeathCount;
+                lastSeenTime = s.LastSeenTime;
+                lastDeathTime = s.LastDeathTime;
+
+                dangerPos.Clear(); dangerTime.Clear(); dangerWeight.Clear();
+                var events = s.DangerEvents;
+                if (events != null)
+                {
+                    for (int i = 0; i < events.Count; i++)
+                    {
+                        dangerPos.Add(events[i].pos);
+                        dangerTime.Add(events[i].time);
+                        dangerWeight.Add(events[i].weight);
+                    }
+                }
             }
 
             /// <summary>
@@ -82,21 +84,41 @@ namespace BloodMoon
             /// <param name="s">数据存储对象</param>
             public void ToStore(AIDataStore s)
             {
-                if (playerAmbushSpots != null) s.PlayerAmbushSpots = playerAmbushSpots;
                 if (stuckSpots != null) s.StuckSpots = stuckSpots;
                 s.LastKnownPlayerPos = lastKnownPlayerPos;
-                s._reloadCount = reloadCount;
                 s.DeathCount = deathCount;
+                s.LastSeenTime = lastSeenTime;
+                s.LastDeathTime = lastDeathTime;
+
+                var events = new List<DangerEvent>();
+                if (dangerPos != null)
+                {
+                    for (int i = 0; i < dangerPos.Count; i++)
+                    {
+                        events.Add(new DangerEvent
+                        {
+                            pos = dangerPos[i],
+                            time = (dangerTime != null && i < dangerTime.Count) ? dangerTime[i] : 0f,
+                            weight = (dangerWeight != null && i < dangerWeight.Count) ? dangerWeight[i] : 1f
+                        });
+                    }
+                }
+                s.DangerEvents = events;
             }
         }
 
         private const string FolderName = "BloodMoonAI";
-        private const string GlobalFileName = "global_tactics.json";
 
-        private float _avgPlayerSpeed = 3.0f;
+        // 落盘去抖状态（P1-13）
+        private bool _dirty;
+        private float _lastWriteRealtime = -999f;
+        /// <summary>当前内存里的地图记忆属于哪个文件（切图时必须写回旧文件，P0-7）</summary>
+        private string _loadedMapFileName = string.Empty;
+        /// <summary>当前内存里的地图记忆是否属于 raid 地图（基地/加载场景不记录）</summary>
+        private bool _mapIsRaid;
+
         public Vector3 LastKnownPlayerPos;
         public float LastSeenTime;
-        public List<Vector3> PlayerAmbushSpots = new List<Vector3>();
         public List<Vector3> StuckSpots = new List<Vector3>();
 
         /// <summary>
@@ -115,7 +137,7 @@ namespace BloodMoon
         }
 
         /// <summary>
-        /// 检查位置是否是曾经卡住的位置
+        /// 检查位置是否是曾经卡住的位置（供 AI 绕开已知卡点）
         /// </summary>
         /// <param name="pos">要检查的位置</param>
         /// <param name="threshold">距离阈值</param>
@@ -130,104 +152,20 @@ namespace BloodMoon
             return false;
         }
 
-        /// <summary>
-        /// 标记玩家伏击位置
-        /// </summary>
-        /// <param name="playerPos">玩家位置</param>
-        public void MarkPlayerAmbush(Vector3 playerPos)
-        {
-            // 避免重复记录
-            for (int i = 0; i < PlayerAmbushSpots.Count; i++)
-            {
-                if ((PlayerAmbushSpots[i] - playerPos).sqrMagnitude < 4.0f)
-                {
-                    // 已知位置
-                    return;
-                }
-            }
-            PlayerAmbushSpots.Add(playerPos);
-            if (PlayerAmbushSpots.Count > 32) PlayerAmbushSpots.RemoveAt(0);
-        }
+        // P2 清理（2026-09-10）：删除了以下**写入端与读取端都没有调用者**的整条链路 ——
+        //   · 玩家伏击点：MarkPlayerAmbush / IsPlayerAmbushSpot / PlayerAmbushSpots / 存档字段
+        //   · 玩家速度 EMA：RecordPlayerSpeed / GetAverageSpeed / _avgPlayerSpeed / 存档字段
+        //   · 玩家装填计数：RegisterPlayerReload / GetAggressionBoost / reloadCount
+        //   · 策略权重：GetWeight / ApplyReward / DecayWeights / RecenterWeights / StrategyWeights
+        //   · 队长编队偏好：GetLeaderPref / UpdateLeaderPref / SetLeaderPrefBaseline / LeaderPrefs
+        //   · 进攻路线统计：RecordApproachOutcome / GetApproachWeight / ApproachStats
+        //   · 危险批量查询：ComputeHeatBatch
+        // 连带移除了整个"全局数据"层（GlobalSaveData / global_tactics.json）——
+        // 它承载的正是上面这些没人用的数据。地图记忆层保持不变。
 
-        /// <summary>
-        /// 检查位置是否是玩家伏击点
-        /// </summary>
-        /// <param name="pos">要检查的位置</param>
-        /// <param name="threshold">距离阈值</param>
-        /// <returns>是否是伏击点</returns>
-        public bool IsPlayerAmbushSpot(Vector3 pos, float threshold)
-        {
-             float sqrThresh = threshold * threshold;
-             for (int i = 0; i < PlayerAmbushSpots.Count; i++)
-            {
-                if ((PlayerAmbushSpots[i] - pos).sqrMagnitude < sqrThresh) return true;
-            }
-            return false;
-        }
-        [Serializable]
-        public struct DangerEvent
-        {
-            public Vector3 pos;
-            public float time;
-            public float weight;
-        }
         public List<DangerEvent> DangerEvents = new List<DangerEvent>();
-        private int _reloadCount;
-        private float _lastReloadMark;
         public int DeathCount;
         public float LastDeathTime;
-        [Serializable]
-        public struct ApproachStat
-        {
-            public Vector3 pos;
-            public int success;
-            public int fail;
-            public float lastTime;
-        }
-        public List<ApproachStat> ApproachStats = new List<ApproachStat>();
-        [Serializable]
-        public struct KeyWeight
-        {
-            public string key;
-            public float w;
-        }
-        public List<KeyWeight> StrategyWeights = new List<KeyWeight>();
-
-        [Serializable]
-        public struct LeaderPref
-        {
-            public string id;
-            public float baseRadius;
-            public float sideAngle;
-            public float spacing;
-            public float lastUpdate;
-        }
-        public List<LeaderPref> LeaderPrefs = new List<LeaderPref>();
-        
-        // 运行时缓存用于O(1)查找
-        private Dictionary<string, int> _leaderPrefIndexCache = new Dictionary<string, int>();
-
-        /// <summary>
-        /// 记录玩家移动速度，用于AI学习
-        /// </summary>
-        /// <param name="v">玩家速度</param>
-        public void RecordPlayerSpeed(float v)
-        {
-            if (v > 0.05f && v < 15f)
-            {
-                // 指数移动平均（EMA），alpha = 0.05
-                _avgPlayerSpeed = Mathf.Lerp(_avgPlayerSpeed, v, 0.05f);
-            }
-        }
-
-        /// <summary>
-        /// 获取平均玩家速度
-        /// </summary>
-        /// <returns>平均速度</returns>
-        public float GetAverageSpeed()
-        {
-            return _avgPlayerSpeed;
-        }
 
         /// <summary>
         /// 标记危险位置
@@ -256,16 +194,6 @@ namespace BloodMoon
             return heat;
         }
 
-        public float[] ComputeHeatBatch(Vector3[] positions, float now, float radius)
-        {
-            float[] results = new float[positions.Length];
-            for (int i = 0; i < positions.Length; i++)
-            {
-                results[i] = GetHeatAt(positions[i], now, radius);
-            }
-            return results;
-        }
-
         public void DecayAndPrune(float now, float maxAgeSec)
         {
             for (int i = DangerEvents.Count - 1; i >= 0; i--)
@@ -275,27 +203,22 @@ namespace BloodMoon
             if (DangerEvents.Count > 64) DangerEvents.RemoveRange(0, DangerEvents.Count - 64);
         }
 
-        public void RegisterPlayerReload()
-        {
-            float now = Time.time;
-            if (now - _lastReloadMark > 1.0f)
-            {
-                _reloadCount++;
-                _lastReloadMark = now;
-            }
-        }
-
-        public float GetAggressionBoost(float now)
-        {
-            float recent = Mathf.Clamp01(1f - Mathf.Max(0f, now - _lastReloadMark) / 6f);
-            return 1f + recent * Mathf.Clamp(_reloadCount, 0, 5) * 0.03f;
-        }
-
         private string GetSaveDirectory()
         {
-            // 若存在 BepInEx 配置路径或用户数据路径，则使用该路径；否则使用相对于可执行文件的路径
+            // 修复（2026-09-10 发布前检查）：原来无条件用 <游戏根>\UserData\<FolderName>，
+            // 但游戏自己的 UserData 目录未必存在（实测只有玩家手动开过仓库之类才会建），
+            // 于是模组会在游戏根目录凭空造一个 UserData —— 玩家可能装的其它模组各有各的写法，
+            // 目录会越堆越乱。
+            // 现在的顺序：
+            //   ① 游戏已有 <根>\UserData        → 用它（与游戏习惯一致，便于玩家找到）
+            //   ② 否则用 Application.persistentDataPath（= %USERPROFILE%\AppData\LocalLow\TeamSoda\Duckov）
+            //      —— 这是 Unity 保证可写的模组数据位置，且一定在模组文件夹之外
             string root = Directory.GetParent(Application.dataPath).FullName;
-            string path = Path.Combine(root, "UserData", FolderName);
+            string userData = Path.Combine(root, "UserData");
+            string path = Directory.Exists(userData)
+                ? Path.Combine(userData, FolderName)
+                : Path.Combine(Application.persistentDataPath, FolderName);
+
             if (!Directory.Exists(path))
             {
                 Directory.CreateDirectory(path);
@@ -305,9 +228,39 @@ namespace BloodMoon
 
         private string GetMapFileName()
         {
-            var scene = SceneManager.GetActiveScene();
-            var name = string.IsNullOrEmpty(scene.name) ? "UnknownScene" : scene.name;
-            return $"map_{name}.json";
+            // 修复 P0-7：多场景架构下 SceneManager.GetActiveScene() 返回的是**当前激活的子场景**
+            // （MultiSceneCore.cs:302/329 会切换 active scene），拿它当键会导致
+            //   · 子场景卸载前保存 → 数据写进 map_<主场景>.json
+            //   · 换图后 Load 找不到当图数据
+            // 正确来源是 LevelManager 所在主场景名（LevelManager.cs:771-790），
+            // 它在一张 raid 图内切换子场景时保持不变。
+            string name = BloodMoon.Utils.SceneUtils.GetLevelSceneName();
+            if (string.IsNullOrEmpty(name)) name = "UnknownScene";
+            return $"map_{SanitizeFileName(name)}.json";
+        }
+
+        /// <summary>
+        /// 场景名可能含路径分隔符等非法字符，落盘前净化
+        /// </summary>
+        private static string SanitizeFileName(string name)
+        {
+            var sb = new System.Text.StringBuilder(name.Length);
+            foreach (char c in name)
+            {
+                sb.Append(Array.IndexOf(Path.GetInvalidFileNameChars(), c) >= 0 ? '_' : c);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 原子写：先写临时文件再替换，避免写盘中途被打断导致 JSON 截断损坏（修复 P1-13）
+        /// </summary>
+        private static void WriteAllTextAtomic(string path, string content)
+        {
+            string tmp = path + ".tmp";
+            File.WriteAllText(tmp, content);
+            if (File.Exists(path)) File.Delete(path);
+            File.Move(tmp, path);
         }
 
         /// <summary>
@@ -315,26 +268,65 @@ namespace BloodMoon
         /// </summary>
         public void Save()
         {
+            _dirty = false;
+            _lastWriteRealtime = Time.realtimeSinceStartup;
             try
             {
                 string dir = GetSaveDirectory();
 
-                // 1. 保存全球数据
-                var globalData = new GlobalSaveData();
-                globalData.FromStore(this);
-                string globalJson = JsonUtility.ToJson(globalData, true);
-                File.WriteAllText(Path.Combine(dir, GlobalFileName), globalJson);
+                // 保存地图数据 —— 只写回这份记忆**所属**的文件。
+                // 绝不能用"当前场景名"重新算文件名：实机曾出现 raid 结束后在加载场景里
+                // 把 raid 记忆写成 map_LoadingScreen 1.json 的情况（20:17 实测）。
+                // 非 raid 场景（基地/加载界面）根本不记录地图记忆，避免生成垃圾文件。
+                if (_mapIsRaid && !string.IsNullOrEmpty(_loadedMapFileName))
+                {
+                    string mapJson = SaveMapTo(dir, _loadedMapFileName);
 
-                // 2. 保存地图数据
-                var mapData = new MapSaveData();
-                mapData.FromStore(this);
-                string mapJson = JsonUtility.ToJson(mapData, true);
-                File.WriteAllText(Path.Combine(dir, GetMapFileName()), mapJson);
+                    // 首次落盘打一行自检（确认 List<结构体> 真的被序列化了 —— 它曾被 JsonUtility 静默丢弃）
+                    if (BloodMoon.Utils.ModConfig.Instance.EnableDebugLogging)
+                    {
+                        BloodMoon.Utils.Logger.Debug(
+                            $"[AIDataStore] Save ok -> {_loadedMapFileName} ({mapJson.Length}B). " +
+                            $"stuck={StuckSpots.Count} danger={DangerEvents.Count} " +
+                            $"mapDangerSerialized={mapJson.Contains("dangerPos")}");
+                    }
+                }
             }
             catch (Exception e)
             {
-                Debug.LogError($"[BloodMoon] Failed to save AI data: {e.Message}");
+                Logger.Error($"Failed to save AI data: {e.Message}");
             }
+        }
+
+        /// <summary>
+        /// 把当前地图记忆写入指定文件（用于切图时把旧图数据写回**旧文件**），返回写出的 JSON
+        /// </summary>
+        private string SaveMapTo(string dir, string fileName)
+        {
+            var mapData = new MapSaveData();
+            mapData.FromStore(this);
+            string mapJson = JsonUtility.ToJson(mapData, true);
+            WriteAllTextAtomic(Path.Combine(dir, fileName), mapJson);
+            return mapJson;
+        }
+
+        /// <summary>
+        /// 请求保存（去抖）。修复 P1-13：BossManager 在一次 raid 结束/子场景卸载里会连续调用多次
+        /// Save()（同一帧最多 4~6 次全量 JSON 落盘），改为打脏标记，由 ModBehaviour 的 0.5s 心跳统一 Flush。
+        /// </summary>
+        public void RequestSave()
+        {
+            _dirty = true;
+        }
+
+        /// <summary>
+        /// 若存在未落盘的修改则写盘（带最小间隔），由 ModBehaviour 的定时器调用
+        /// </summary>
+        public void FlushIfDirty(float minIntervalSeconds = 0.5f)
+        {
+            if (!_dirty) return;
+            if (Time.realtimeSinceStartup - _lastWriteRealtime < minIntervalSeconds) return;
+            Save();
         }
 
         /// <summary>
@@ -342,29 +334,79 @@ namespace BloodMoon
         /// </summary>
         public void Load()
         {
+            string dir = GetSaveDirectory();
+
+            // 只有 raid 地图才加载/记录地图记忆（基地、加载界面不记录）
+            _mapIsRaid = IsCurrentRaidMap();
+            if (_mapIsRaid)
+            {
+                LoadMap(dir);
+                Logger.Log($"Loaded map AI data: {_loadedMapFileName}");
+            }
+            else
+            {
+                _loadedMapFileName = string.Empty;
+                Logger.Log("Not a raid map, AI map memory idle until a raid starts");
+            }
+        }
+
+        /// <summary>
+        /// 关卡初始化时调用：按当前关卡切换地图记忆。
+        /// 修复 P0-7 的完整语义：
+        ///   · raid → 若换了图，先把旧图的记忆写回**旧文件**，再载入新图数据；
+        ///   · 离开 raid（基地/加载场景）→ 把 raid 记忆落盘后停止记录，
+        ///     这样不会再把 raid 数据写成 map_LoadingScreen / map_Startup 之类的垃圾文件。
+        /// </summary>
+        public void ReloadForCurrentScene()
+        {
             try
             {
                 string dir = GetSaveDirectory();
+                bool isRaid = IsCurrentRaidMap();
 
-                // 1. 加载全局数据
-                string globalPath = Path.Combine(dir, GlobalFileName);
-                if (File.Exists(globalPath))
+                if (!isRaid)
                 {
-                    string json = File.ReadAllText(globalPath);
-                    var globalData = JsonUtility.FromJson<GlobalSaveData>(json);
-                    if (globalData != null) globalData.ToStore(this);
-                }
-                else
-                {
-                    // 全局的默认设置
-                    _avgPlayerSpeed = 3.0f;
-                    ApproachStats = new List<ApproachStat>();
-                    StrategyWeights = new List<KeyWeight>();
-                    LeaderPrefs = new List<LeaderPref>();
+                    if (_mapIsRaid && !string.IsNullOrEmpty(_loadedMapFileName))
+                    {
+                        SaveMapTo(dir, _loadedMapFileName);   // 离开 raid：落盘
+                    }
+                    _mapIsRaid = false;
+                    _loadedMapFileName = string.Empty;
+                    return;
                 }
 
-                // 2. 加载地图数据
-                string mapPath = Path.Combine(dir, GetMapFileName());
+                string newFile = GetMapFileName();
+                if (_mapIsRaid && newFile == _loadedMapFileName) return;   // 同一张 raid 图（含子场景切换）
+
+                if (_mapIsRaid && !string.IsNullOrEmpty(_loadedMapFileName))
+                {
+                    SaveMapTo(dir, _loadedMapFileName);       // 旧图数据写回旧文件
+                }
+                _mapIsRaid = true;
+                LoadMap(dir);                                  // 载入新图数据（内部设置 _loadedMapFileName）
+                Logger.Log($"Switched map AI data to {_loadedMapFileName}");
+            }
+            catch (Exception e)
+            {
+                Logger.Error($"Failed to reload map AI data: {e.Message}");
+            }
+        }
+
+        /// <summary>当前关卡是否是 raid 地图（基地与加载场景不算）</summary>
+        private static bool IsCurrentRaidMap()
+        {
+            // 统一走 SceneUtils：LevelManager.IsRaidMap 在基地/加载场景上不可靠
+            // （LevelConfig 的字段默认值就是 isRaidMap=true / isBaseLevel=false）
+            return BloodMoon.Utils.SceneUtils.IsRaidScene();
+        }
+
+
+        private void LoadMap(string dir)
+        {
+            try
+            {
+                string fileName = GetMapFileName();
+                string mapPath = Path.Combine(dir, fileName);
                 if (File.Exists(mapPath))
                 {
                     string json = File.ReadAllText(mapPath);
@@ -374,20 +416,18 @@ namespace BloodMoon
                 else
                 {
                     // 地图的默认设置
-                    PlayerAmbushSpots = new List<Vector3>();
                     StuckSpots = new List<Vector3>();
                     DangerEvents = new List<DangerEvent>();
                     LastKnownPlayerPos = Vector3.zero;
                     LastSeenTime = 0f;
-                    _reloadCount = 0;
-                    _lastReloadMark = 0f;
                     DeathCount = 0;
                     LastDeathTime = 0f;
                 }
+                _loadedMapFileName = fileName;
             }
             catch (Exception e)
             {
-                Debug.LogError($"[BloodMoon] Failed to load AI data: {e.Message}");
+                Logger.Error($"Failed to load map AI data: {e.Message}");
             }
         }
 
@@ -430,218 +470,6 @@ namespace BloodMoon
             LastDeathTime = Time.time;
             DangerEvents.Add(new DangerEvent { pos = pos, time = LastDeathTime, weight = 2f });
             if (DangerEvents.Count > 64) DangerEvents.RemoveAt(0);
-            ApplyReward("dash_prob", -0.1f);
-            ApplyReward("spray_prob", -0.1f);
-            ApplyReward("approach", -0.1f);
-        }
-
-        public float GetWeight(string key, float def)
-        {
-            for (int i = 0; i < StrategyWeights.Count; i++)
-            {
-                if (StrategyWeights[i].key == key) return StrategyWeights[i].w;
-            }
-            StrategyWeights.Add(new KeyWeight { key = key, w = def });
-            return def;
-        }
-
-        public void ApplyReward(string key, float delta)
-        {
-            for (int i = 0; i < StrategyWeights.Count; i++)
-            {
-                if (StrategyWeights[i].key == key)
-                {
-                    var v = StrategyWeights[i];
-                    v.w = Mathf.Clamp(v.w + delta, 0.2f, 1.8f);
-                    StrategyWeights[i] = v;
-                    return;
-                }
-            }
-            StrategyWeights.Add(new KeyWeight { key = key, w = Mathf.Clamp(delta, 0.2f, 1.8f) });
-        }
-
-        public void DecayWeights(float factor)
-        {
-            for (int i = 0; i < StrategyWeights.Count; i++)
-            {
-                var kv = StrategyWeights[i];
-                float def = 1.0f;
-                kv.w = Mathf.Lerp(kv.w, def, 1f - factor);
-                StrategyWeights[i] = kv;
-            }
-        }
-
-        public void RecenterWeights(float rate)
-        {
-            float sum = 0f;
-            for (int i = 0; i < StrategyWeights.Count; i++) sum += StrategyWeights[i].w;
-            float avg = StrategyWeights.Count > 0 ? sum / StrategyWeights.Count : 1f;
-            for (int i = 0; i < StrategyWeights.Count; i++)
-            {
-                var kv = StrategyWeights[i];
-                kv.w = Mathf.Lerp(kv.w, avg, rate);
-                StrategyWeights[i] = kv;
-            }
-        }
-
-        public LeaderPref GetLeaderPref(string id)
-        {
-            if (_leaderPrefIndexCache.TryGetValue(id, out int idx))
-            {
-                if (idx < LeaderPrefs.Count && LeaderPrefs[idx].id == id) return LeaderPrefs[idx];
-                _leaderPrefIndexCache.Remove(id); // 无效的缓存
-            }
-            
-            for (int i = 0; i < LeaderPrefs.Count; i++)
-            {
-                if (LeaderPrefs[i].id == id) 
-                {
-                    _leaderPrefIndexCache[id] = i;
-                    return LeaderPrefs[i];
-                }
-            }
-            var lp = new LeaderPref { id = id, baseRadius = 3.0f, sideAngle = 30f, spacing = 1.2f, lastUpdate = Time.time };
-            LeaderPrefs.Add(lp);
-            _leaderPrefIndexCache[id] = LeaderPrefs.Count - 1;
-            
-            // 如果缓存超过 256 个项，则修剪最旧的项
-            if (LeaderPrefs.Count > 256)
-            {
-                // 删除最旧的
-                int oldestIdx = 0; float oldestTime = float.MaxValue;
-                for(int i=0; i<LeaderPrefs.Count; i++)
-                {
-                    if (LeaderPrefs[i].lastUpdate < oldestTime) { oldestTime = LeaderPrefs[i].lastUpdate; oldestIdx = i; }
-                }
-                LeaderPrefs.RemoveAt(oldestIdx);
-                _leaderPrefIndexCache.Clear(); // 缓存无效，需要完整重建
-            }
-            return lp;
-        }
-
-        public void UpdateLeaderPref(string id, float pressureScore, Vector3 center)
-        {
-            int idx = -1;
-            if (_leaderPrefIndexCache.TryGetValue(id, out int cIdx))
-            {
-                if (cIdx < LeaderPrefs.Count && LeaderPrefs[cIdx].id == id) idx = cIdx;
-            }
-            
-            if (idx == -1)
-            {
-                for (int i = 0; i < LeaderPrefs.Count; i++)
-                {
-                    if (LeaderPrefs[i].id == id) { idx = i; _leaderPrefIndexCache[id] = i; break; }
-                }
-            }
-            
-            LeaderPref lp = idx >= 0 ? LeaderPrefs[idx] : GetLeaderPref(id);
-            float density = 0f;
-            float densNorm = Mathf.Clamp(density / 8f, 0f, 1f);
-            float pressNorm = Mathf.Clamp(pressureScore / 3f, 0f, 1f);
-            float widen = Mathf.Clamp01(0.5f * densNorm + 0.5f * pressNorm);
-            float tighten = 1f - widen;
-            lp.baseRadius = Mathf.Clamp(Mathf.Lerp(lp.baseRadius, 2.8f + 3.2f * widen, 0.1f), 2.5f, 6.8f);
-            lp.spacing = Mathf.Clamp(Mathf.Lerp(lp.spacing, 1.0f + 0.8f * widen, 0.1f), 1.0f, 1.8f);
-            float targetAngle = Mathf.Lerp(28f, 38f, widen);
-            lp.sideAngle = Mathf.Clamp(Mathf.Lerp(lp.sideAngle, targetAngle, 0.1f), 25f, 40f);
-            lp.lastUpdate = Time.time;
-            if (idx >= 0) LeaderPrefs[idx] = lp; 
-            else 
-            {
-                LeaderPrefs.Add(lp);
-                _leaderPrefIndexCache[id] = LeaderPrefs.Count - 1;
-            }
-        }
-
-        public void SetLeaderPrefBaseline(string id, float baseRadius, float sideAngle, float spacing)
-        {
-            int idx = -1;
-            if (_leaderPrefIndexCache.TryGetValue(id, out int cIdx))
-            {
-                if (cIdx < LeaderPrefs.Count && LeaderPrefs[cIdx].id == id) idx = cIdx;
-            }
-            
-            if (idx == -1)
-            {
-                for (int i = 0; i < LeaderPrefs.Count; i++)
-                {
-                    if (LeaderPrefs[i].id == id) { idx = i; _leaderPrefIndexCache[id] = i; break; }
-                }
-            }
-            
-            var lp = new LeaderPref { id = id, baseRadius = baseRadius, sideAngle = sideAngle, spacing = spacing, lastUpdate = Time.time };
-            if (idx >= 0) LeaderPrefs[idx] = lp; 
-            else 
-            {
-                LeaderPrefs.Add(lp);
-                _leaderPrefIndexCache[id] = LeaderPrefs.Count - 1;
-            }
-        }
-
-        public void RecordApproachOutcome(Vector3 point, bool success)
-        {
-            // 将网格捕捉（量化）到2米网格以实现学习的泛化
-            point = new Vector3(
-                Mathf.Round(point.x / 2f) * 2f,
-                Mathf.Round(point.y / 1f) * 1f, // Y 的重要性降低，但需精确对齐至 1 米
-                Mathf.Round(point.z / 2f) * 2f
-            );
-
-            int idx = -1; float minDist = 0.5f; // 由于我们量化到 2m 网格，因此精确匹配的可能性较高
-            for (int i = 0; i < ApproachStats.Count; i++)
-            {
-                if (Vector3.Distance(ApproachStats[i].pos, point) < minDist) { idx = i; break; }
-            }
-            if (idx == -1)
-            {
-                ApproachStats.Add(new ApproachStat { pos = point, success = success ? 1 : 0, fail = success ? 0 : 1, lastTime = Time.time });
-            }
-            else
-            {
-                var st = ApproachStats[idx];
-                if (success) st.success++; else st.fail++;
-                st.lastTime = Time.time;
-                ApproachStats[idx] = st;
-            }
-            if (ApproachStats.Count > 120) ApproachStats.RemoveAt(0); // 增加的缓冲区
-        }
-
-        public float GetApproachWeight(Vector3 point)
-        {
-            // 量化以匹配（模型查找）
-            point = new Vector3(
-                Mathf.Round(point.x / 2f) * 2f,
-                Mathf.Round(point.y / 1f) * 1f,
-                Mathf.Round(point.z / 2f) * 2f
-            );
-
-            float w = 1f; float minDist = 0.5f;
-            for (int i = 0; i < ApproachStats.Count; i++)
-            {
-                var st = ApproachStats[i];
-                if (Vector3.Distance(st.pos, point) < minDist)
-                {
-                    float s = Mathf.Max(0, st.success);
-                    float f = Mathf.Max(0, st.fail);
-                    float recency = Mathf.Exp(-Mathf.Max(0f, Time.time - st.lastTime) / 120f);
-                    // 采样的启发式方法：(成功次数 + 1) / (总次数 + 2)
-                    // 但在这里我们想要一个权重乘数。
-                    // 如果成功概率高，则权重 > 1。如果失败概率高，则权重 < 1。
-                    float total = s + f;
-                    if (total > 0)
-                    {
-                        float rate = s / total;
-                        // 偏向 1.0 如果样本量低（最近性衰减也降低了置信度）
-                        w = Mathf.Lerp(1.0f, rate * 2.0f, Mathf.Clamp01(total / 5f) * recency); 
-                        // 将 0..1 率映射到 0.5..1.5 乘数范围？或 0..2？
-                        // 让我们说：率 0.5 -> 1.0。率 1.0 -> 2.0。率 0.0 -> 0.0？
-                        // 如果我们失败很多次，我们想阻止 (w < 1).
-                    }
-                    break;
-                }
-            }
-            return w;
         }
 
         // 运行时参与跟踪（非序列化）
@@ -717,6 +545,7 @@ namespace BloodMoon
             {
                 _spatialGrid.Add(c);
             }
+
         }
     }
 

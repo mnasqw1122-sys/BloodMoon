@@ -95,9 +95,8 @@ namespace BloodMoon.AI
                 AccuracyMultiplier = Mathf.Lerp(1.2f, 0.8f, (_difficultyScore - 0.5f) / 2f); // 散布越低越好
                 DamageMultiplier = Mathf.Lerp(0.9f, 1.3f, (_difficultyScore - 0.5f) / 2f);
 
-                #if DEBUG
-                // Logger.Debug($"自适应难度已更新: 分数={_difficultyScore:F2} (KPM={kpm:F1}, DPM={dpm:F1})");
-                #endif
+                // P2 清理：删除了这里的空 #if DEBUG 块（内部日志早已被注释掉，是死代码）。
+                // 需要观察难度曲线时，在 BloodMoonConfig.json 里把 EnableDebugLogging 设为 true。
             }
             catch (System.Exception ex)
             {

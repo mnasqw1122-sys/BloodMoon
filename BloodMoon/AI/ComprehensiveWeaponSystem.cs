@@ -26,12 +26,15 @@ namespace BloodMoon.AI
             {
                 if (w == null) continue;
                 if (w == PrimaryWeapon || w == SecondaryWeapon || w == MeleeWeapon || w == ThrowableWeapon) continue;
-                if (w.GetComponent<ItemAgent_Gun>())
+                // 用结构判定（ItemSetting_*/ItemAgent_*）而不是 GetComponent<ItemAgent_Gun>()：
+                // 刚实例化的物品上还没有 ItemAgent_*（它由 ItemAgent_Gun.BuildAgent() 在运行时挂），
+                // 原来那样写会把背包里的枪识别不出来。
+                if (EnhancedWeaponManager.LooksLikeGun(w))
                 {
                     if (PrimaryWeapon == null) PrimaryWeapon = w;
                     else if (SecondaryWeapon == null) SecondaryWeapon = w;
                 }
-                else if (w.GetComponent<ItemAgent_MeleeWeapon>())
+                else if (EnhancedWeaponManager.LooksLikeMelee(w))
                 {
                     if (MeleeWeapon == null) MeleeWeapon = w;
                 }
@@ -45,9 +48,21 @@ namespace BloodMoon.AI
 
     public class WeaponCache
     {
-        private List<Item> _cachedWeapons = new List<Item>();
         private List<int> _cachedWeaponIds = new List<int>();
 
+        /// <summary>本轮是否已经回填过武器池（避免每次 Preload 都全表搜索）</summary>
+        private bool _poolPulled;
+
+        /// <summary>
+        /// 预加载。
+        ///
+        /// 2026-09-10 实机日志观察项：`PreloadWeaponResources()` 会对 6 个武器名各调一次本方法，
+        /// 而原实现每次都要跑两遍 `ItemAssetsCollection.Search`（全表搜索）→ 启动时 12 次全表扫描，
+        /// 日志里能看到重复的 `Added 39 gun IDs (total: 39)` / `Added 17 melee IDs (total: 56)`。
+        ///
+        /// 现在只保留"按名字找 ID"（廉价），武器池统一从 EnhancedWeaponManager 已经构建好的
+        /// （且已过武器池过滤的）缓存里取一次。
+        /// </summary>
         public void Preload(string weaponName)
         {
             try
@@ -68,86 +83,36 @@ namespace BloodMoon.AI
                 {
                     BloodMoon.Utils.Logger.Warning($"[WeaponCache] Name search failed for '{weaponName}': {ex.Message}");
                 }
-                
-                // 策略2：通用枪支搜索（按标签兜底）
-                var filterGun = new ItemFilter
+
+                // 策略2：复用 EnhancedWeaponManager 已经建好的武器池（只做一次）
+                if (!_poolPulled)
                 {
-                    minQuality = 1,
-                    maxQuality = 5,
-                    requireTags = new Tag[] { GameplayDataSettings.Tags.Gun }
-                };
-                
-                try 
-                {
-                    var idsGun = ItemAssetsCollection.Search(filterGun);
-                    if (idsGun != null && idsGun.Length > 0)
+                    _poolPulled = true;
+                    int added = 0;
+                    var gunIds = EnhancedWeaponManager.Instance.CachedGunIds;
+                    for (int i = 0; i < gunIds.Count; i++)
                     {
-                        int added = 0;
-                        foreach (var id in idsGun)
+                        if (!_cachedWeaponIds.Contains(gunIds[i]))
                         {
-                            if (!_cachedWeaponIds.Contains(id))
-                            {
-                                _cachedWeaponIds.Add(id);
-                                added++;
-                            }
-                        }
-                        if (added > 0)
-                        {
-                            BloodMoon.Utils.Logger.Log($"[WeaponCache] Added {added} gun IDs (total: {_cachedWeaponIds.Count})");
+                            _cachedWeaponIds.Add(gunIds[i]);
+                            added++;
                         }
                     }
-                }
-                catch (System.Exception ex)
-                {
-                    BloodMoon.Utils.Logger.Warning($"[WeaponCache] Gun tag search failed: {ex.Message}");
-                }
-                
-                // 策略3：近战武器搜索
-                Tag? meleeTag = GameplayDataSettings.Tags.AllTags.FirstOrDefault(t => t.name == "Melee");
-                Tag? weaponTag = GameplayDataSettings.Tags.AllTags.FirstOrDefault(t => t.name == "Weapon");
-                
-                if (meleeTag != null || weaponTag != null)
-                {
-                    var filterMelee = new ItemFilter
+                    var meleeIds = EnhancedWeaponManager.Instance.CachedMeleeIds;
+                    for (int i = 0; i < meleeIds.Count; i++)
                     {
-                        minQuality = 1,
-                        maxQuality = 5,
-                        requireTags = new Tag[] { meleeTag ?? weaponTag! }
-                    };
-                    
-                    try 
-                    {
-                        var idsMelee = ItemAssetsCollection.Search(filterMelee);
-                        if (idsMelee != null && idsMelee.Length > 0)
+                        if (!_cachedWeaponIds.Contains(meleeIds[i]))
                         {
-                            int added = 0;
-                            foreach (var id in idsMelee)
-                            {
-                                if (!_cachedWeaponIds.Contains(id))
-                                {
-                                    _cachedWeaponIds.Add(id);
-                                    added++;
-                                }
-                            }
-                            if (added > 0)
-                            {
-                                BloodMoon.Utils.Logger.Log($"[WeaponCache] Added {added} melee IDs (total: {_cachedWeaponIds.Count})");
-                            }
+                            _cachedWeaponIds.Add(meleeIds[i]);
+                            added++;
                         }
                     }
-                    catch (System.Exception ex)
+                    if (added > 0)
                     {
-                        BloodMoon.Utils.Logger.Warning($"[WeaponCache] Melee tag search failed: {ex.Message}");
+                        BloodMoon.Utils.Logger.Log($"[WeaponCache] Pulled {added} IDs from weapon manager cache (total: {_cachedWeaponIds.Count})");
                     }
                 }
-                
-                // 策略4：回退到增强武器管理器缓存
-                if (_cachedWeaponIds.Count == 0)
-                {
-                    BloodMoon.Utils.Logger.Log($"[WeaponCache] No weapons found via search, trying to use EnhancedWeaponManager cache...");
-                    // 我们将依赖我们已经改进的EnhancedWeaponManager缓存
-                }
-                
+
                 BloodMoon.Utils.Logger.Log($"[WeaponCache] Preload completed. Total cached weapon IDs: {_cachedWeaponIds.Count}");
             }
             catch (System.Exception ex)
@@ -158,10 +123,30 @@ namespace BloodMoon.AI
 
         public async UniTask<Item?> GetAvailableWeaponAsync()
         {
-             if (_cachedWeaponIds.Count > 0)
+            // 注意：调用方通常是在 EnhancedWeaponManager.SpawnRandomGun() 返回 null 之后才走到这里，
+            // 所以**不要**再回调 SpawnRandomGun（纯属重复劳动）。这里只用本地 ID 表（已从
+            // EnhancedWeaponManager 的过滤后武器池回填），并逐一把空壳/被过滤的物品剔除。
+            if (_cachedWeaponIds.Count > 0)
             {
-                int id = _cachedWeaponIds[Random.Range(0, _cachedWeaponIds.Count)];
-                return await ItemAssetsCollection.InstantiateAsync(id);
+                int attempts = Mathf.Min(8, _cachedWeaponIds.Count);
+                for (int i = 0; i < attempts; i++)
+                {
+                    int idx = Random.Range(0, _cachedWeaponIds.Count);
+                    int id = _cachedWeaponIds[idx];
+                    try
+                    {
+                        var item = await ItemAssetsCollection.InstantiateAsync(id);
+                        if (item == null) continue;
+                        if (EnhancedWeaponManager.IsUsableWeapon(item, requireGun: true)) return item;
+                        Object.Destroy(item.gameObject);
+                        _cachedWeaponIds.RemoveAt(idx);   // 无效 ID 直接出池，避免反复实例化
+                    }
+                    catch (System.Exception ex)
+                    {
+                        BloodMoon.Utils.Logger.Warning($"[WeaponCache] Instantiate failed for ID {id}: {ex.Message}");
+                        _cachedWeaponIds.RemoveAt(idx);
+                    }
+                }
             }
             return null;
         }
@@ -225,22 +210,33 @@ namespace BloodMoon.AI
         public async UniTask<WeaponSet> FindWeaponsForAI(CharacterMainControl character)
         {
             var weaponSet = new WeaponSet();
-            
+
+            if (character == null || character.CharacterItem == null) return weaponSet;
+
+            // 修复 P1-2：与 BossManager.EnsureMinionHasWeapons 互斥，避免同一角色被配两套武器/弹药
+            if (!EnhancedWeaponManager.TryBeginLoadout(character, "ComprehensiveWeaponSystem"))
+            {
+                return weaponSet;
+            }
+
             try
             {
                 // 0.确保武器管理器已初始化
                 await EnhancedWeaponManager.Instance.EnsureInitialized();
-                
-                // 1. 先搜索库存
+
+                if (character == null || character.CharacterItem == null) return weaponSet;
+
+                // 1. 先搜索库存。
+                //    修复 P1-3：不再用 strategy.Type 覆盖 Primary/Secondary ——
+                //    PrimaryWeaponStrategy 与 SecondaryWeaponStrategy 的判定条件逐字相同，
+                //    两轮 SearchInventory 会返回同一把枪，覆盖后 Primary 与 Secondary 会指向同一对象。
+                //    WeaponSet.AddRange 本身已按"第一个→Primary，第二个→Secondary"分配（本文件 :28-33）。
                 foreach (var strategy in _searchStrategies.Values)
                 {
                     var weapons = strategy.SearchInventory(character);
                     if (weapons != null && weapons.Count > 0)
                     {
                         weaponSet.AddRange(weapons);
-                        if (strategy.Type == "Primary" && weapons.Count > 0) weaponSet.PrimaryWeapon = weapons[0];
-                        if (strategy.Type == "Secondary" && weapons.Count > 0) weaponSet.SecondaryWeapon = weapons[0];
-                        if (strategy.Type == "Melee" && weapons.Count > 0) weaponSet.MeleeWeapon = weapons[0];
                     }
                 }
                 
@@ -260,36 +256,63 @@ namespace BloodMoon.AI
                             BloodMoon.Utils.Logger.Warning($"[WeaponSystem] Gun spawn attempt {attempt + 1} failed for {character.name}");
                         }
                     }
-                    
+
+                    // 修复 P0-8：SpawnRandomGun 已做"真实武器"校验，这里再兜一道，
+                    // 避免把空壳（FallbackItem_*）塞进背包并当成武器上报
+                    if (gun != null && !EnhancedWeaponManager.IsUsableWeapon(gun, requireGun: true))
+                    {
+                        BloodMoon.Utils.Logger.Warning($"[WeaponSystem] Spawner returned a non-gun item ({gun.name}), discarded");
+                        UnityEngine.Object.Destroy(gun.gameObject);
+                        gun = null;
+                    }
+
                     if (gun != null)
                     {
-                        character.CharacterItem.Inventory.AddAndMerge(gun);
-                        await EnhancedWeaponManager.Instance.EnsureAmmo(character, gun);
-                        // 插进主武器槽：旧版只塞背包不插槽 → 敌人有枪不掏
-                        var pSlot = character.PrimWeaponSlot();
-                        if (pSlot != null && pSlot.Content == null && pSlot.CanPlug(gun))
+                        // 修复 P0-9：AddAndMerge 在背包满时返回 false 且物品留在场景根不销毁
+                        // （ItemUtilities.cs:149-153），必须检查返回值。
+                        if (!character.CharacterItem.Inventory.AddAndMerge(gun))
                         {
-                            pSlot.Plug(gun, out var _);
+                            BloodMoon.Utils.Logger.Warning($"[WeaponSystem] Inventory full, gun discarded for {character.name}");
+                            UnityEngine.Object.Destroy(gun.gameObject);
+                            gun = null;
                         }
-                        weaponSet.PrimaryWeapon = gun;
-                        BloodMoon.Utils.Logger.Log($"[WeaponSystem] Successfully spawned gun for {character.name}: {gun.name}");
+                        else
+                        {
+                            await EnhancedWeaponManager.Instance.EnsureAmmo(character, gun);
+                            // 插进主武器槽：旧版只塞背包不插槽 → 敌人有枪不掏
+                            var pSlot = character.PrimWeaponSlot();
+                            if (pSlot != null && pSlot.Content == null && pSlot.CanPlug(gun))
+                            {
+                                pSlot.Plug(gun, out var _);
+                            }
+                            weaponSet.PrimaryWeapon = gun;
+                            BloodMoon.Utils.Logger.Log($"[WeaponSystem] Successfully spawned gun for {character.name}: {gun.name}");
+                        }
                     }
-                    else
+
+                    if (gun == null)
                     {
                         // 尝试缓存
                         BloodMoon.Utils.Logger.Log($"[WeaponSystem] Trying weapon cache for {character.name}...");
                         var cached = await _weaponCache.GetAvailableWeaponAsync();
-                        if (cached != null && cached.GetComponent<ItemAgent_Gun>())
+                        if (cached != null && EnhancedWeaponManager.IsUsableWeapon(cached, requireGun: true))
                         {
-                            character.CharacterItem.Inventory.AddAndMerge(cached);
-                            await EnhancedWeaponManager.Instance.EnsureAmmo(character, cached);
-                            var pSlot2 = character.PrimWeaponSlot();
-                            if (pSlot2 != null && pSlot2.Content == null && pSlot2.CanPlug(cached))
+                            if (!character.CharacterItem.Inventory.AddAndMerge(cached))
                             {
-                                pSlot2.Plug(cached, out var _);
+                                BloodMoon.Utils.Logger.Warning($"[WeaponSystem] Inventory full, cached gun discarded for {character.name}");
+                                UnityEngine.Object.Destroy(cached.gameObject);
                             }
-                            weaponSet.PrimaryWeapon = cached;
-                            BloodMoon.Utils.Logger.Log($"[WeaponSystem] Found gun in cache for {character.name}: {cached.name}");
+                            else
+                            {
+                                await EnhancedWeaponManager.Instance.EnsureAmmo(character, cached);
+                                var pSlot2 = character.PrimWeaponSlot();
+                                if (pSlot2 != null && pSlot2.Content == null && pSlot2.CanPlug(cached))
+                                {
+                                    pSlot2.Plug(cached, out var _);
+                                }
+                                weaponSet.PrimaryWeapon = cached;
+                                BloodMoon.Utils.Logger.Log($"[WeaponSystem] Found gun in cache for {character.name}: {cached.name}");
+                            }
                         }
                         else
                         {
@@ -316,17 +339,27 @@ namespace BloodMoon.AI
                     
                     if (melee != null)
                     {
-                        character.CharacterItem.Inventory.AddAndMerge(melee);
-                        // 插进近战槽（旧版同样只塞背包）
-                        var mSlot = character.MeleeWeaponSlot();
-                        if (mSlot != null && mSlot.Content == null && mSlot.CanPlug(melee))
+                        // 修复 P0-9：检查 AddAndMerge 返回值（背包满时物品不会被收纳）
+                        if (!character.CharacterItem.Inventory.AddAndMerge(melee))
                         {
-                            mSlot.Plug(melee, out var _);
+                            BloodMoon.Utils.Logger.Warning($"[WeaponSystem] Inventory full, melee discarded for {character.name}");
+                            UnityEngine.Object.Destroy(melee.gameObject);
+                            melee = null;
                         }
-                        weaponSet.MeleeWeapon = melee;
-                        BloodMoon.Utils.Logger.Log($"[WeaponSystem] Successfully spawned melee weapon for {character.name}: {melee.name}");
+                        else
+                        {
+                            // 插进近战槽（旧版同样只塞背包）
+                            var mSlot = character.MeleeWeaponSlot();
+                            if (mSlot != null && mSlot.Content == null && mSlot.CanPlug(melee))
+                            {
+                                mSlot.Plug(melee, out var _);
+                            }
+                            weaponSet.MeleeWeapon = melee;
+                            BloodMoon.Utils.Logger.Log($"[WeaponSystem] Successfully spawned melee weapon for {character.name}: {melee.name}");
+                        }
                     }
-                    else
+
+                    if (melee == null)
                     {
                         BloodMoon.Utils.Logger.Error($"[WeaponSystem] Failed to find melee weapon for {character.name}");
                     }
@@ -335,6 +368,10 @@ namespace BloodMoon.AI
             catch (System.Exception ex)
             {
                 BloodMoon.Utils.Logger.Error($"[WeaponSystem] Error finding weapons for {character.name}: {ex}");
+            }
+            finally
+            {
+                EnhancedWeaponManager.EndLoadout(character);
             }
             
             LogWeaponFindings(character, weaponSet);

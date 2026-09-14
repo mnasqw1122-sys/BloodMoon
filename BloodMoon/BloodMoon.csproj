@@ -6,7 +6,9 @@
     <SubPath>\Duckov_Data\Managed\</SubPath>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="$(DuckovPath)$(SubPath)TeamSoda.*">
+    <!-- 通配引用必须以 .dll 结尾：Managed 目录里还有反编译工具留下的 *.membercheck.csv，
+         否则会被当成程序集解析，产生 9 条 warning MSB3246 (Image is too small)。 -->
+    <Reference Include="$(DuckovPath)$(SubPath)TeamSoda.*.dll">
       <Private>False</Private>
     </Reference>
     <Reference Include="$(DuckovPath)$(SubPath)ItemStatsSystem.dll">
@@ -21,17 +23,19 @@
     <Reference Include="$(DuckovPath)$(SubPath)Drawing.dll">
       <Private>False</Private>
     </Reference>
-    <Reference Include="$(DuckovPath)$(SubPath)Unity*">
+    <Reference Include="$(DuckovPath)$(SubPath)Unity*.dll">
       <Private>False</Private>
     </Reference>
-    <Reference Include="$(DuckovPath)$(SubPath)UniTask*">
+    <Reference Include="$(DuckovPath)$(SubPath)UniTask*.dll">
       <Private>False</Private>
     </Reference>
-    <Reference Include="$(DuckovPath)$(SubPath)DOTween*">
+    <Reference Include="$(DuckovPath)$(SubPath)DOTween*.dll">
       <Private>False</Private>
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <None Include="info.ini" CopyToOutputDirectory="PreserveNewest" />
+    <!-- info.ini 只存在于游戏模组目录（Duckov_Data\Mods\BloodMoon\info.ini），源码目录没有。
+         加 Exists 条件避免原地构建时报 error MSB3030: 无法复制文件"…\BloodMoon\info.ini"。 -->
+    <None Include="info.ini" CopyToOutputDirectory="PreserveNewest" Condition="Exists('info.ini')" />
   </ItemGroup>
 </Project>

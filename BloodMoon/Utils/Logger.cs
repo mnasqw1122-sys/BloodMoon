@@ -67,15 +67,17 @@ namespace BloodMoon.Utils
         }
 
         /// <summary>
-        /// 记录调试级别日志（仅在DEBUG模式下）
+        /// 记录调试级别日志。是否输出由配置 <c>EnableDebugLogging</c> 在运行时决定
+        /// （P2 清理：原先用 <c>#if DEBUG</c> 编译期开关，导致 Release 包里
+        /// 所有调试输出被整体剔除，玩家想排查时无从开启；改为运行时开关后
+        /// 发行版也能按需打开，且默认关闭不产生噪音）。
         /// </summary>
         /// <param name="message">日志消息</param>
         public static void Debug(string message)
         {
-#if DEBUG
+            if (!ModConfig.Instance.EnableDebugLogging) return;
             UnityEngine.Debug.Log($"[BloodMoon DEBUG] {message}");
             WriteToFile($"[DEBUG] {message}");
-#endif
         }
 
         /// <summary>

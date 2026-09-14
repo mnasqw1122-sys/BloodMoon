@@ -101,27 +101,6 @@ namespace BloodMoon
             return TimeSpan.FromTicks(Period - pos);
         }
 
-        /// <summary>
-        /// 获取休眠阶段的进度百分比
-        /// </summary>
-        /// <param name="now">当前游戏时间</param>
-        /// <returns>进度百分比（0.0到1.0</returns>
-        public float GetSleepPercent(TimeSpan now)
-        {
-            long pos = (now.Ticks + _offsetTicks) % Period;
-            return (float)pos / SleepTime.Ticks;
-        }
 
-        /// <summary>
-        /// 获取激活阶段的剩余时间百分比
-        /// </summary>
-        /// <param name="now">当前游戏时间</param>
-        /// <returns>剩余时间百分比（0.0到1.0</returns>
-        public float GetActiveRemainPercent(TimeSpan now)
-        {
-            long pos = (now.Ticks + _offsetTicks) % Period - SleepTime.Ticks;
-            return 1f - (float)pos / ActiveTime.Ticks;
-        }
     }
 }
-

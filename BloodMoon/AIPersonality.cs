@@ -10,7 +10,6 @@ namespace BloodMoon
         public float Aggression;  // 偏好攻击/冲锋
         public float Caution;     // 偏好掩护/撤退
         public float Teamwork;    // 偏好小队战术/支援
-        public float Greed;       // 偏好掠夺/击杀 vs 战术
 
         /// <summary>
         /// 构造函数，创建默认平衡性格
@@ -21,7 +20,6 @@ namespace BloodMoon
             Aggression = 0.5f;
             Caution = 0.5f;
             Teamwork = 0.5f;
-            Greed = 0.5f;
         }
 
         /// <summary>
@@ -37,7 +35,6 @@ namespace BloodMoon
             if (p.Aggression > 0.7f) p.Caution *= 0.6f;
             
             p.Teamwork = UnityEngine.Random.Range(0.0f, 1.0f);
-            p.Greed = UnityEngine.Random.Range(0.2f, 0.8f);
             return p;
         }
 

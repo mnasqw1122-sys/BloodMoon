@@ -40,12 +40,7 @@ namespace BloodMoon
         public bool CanChase;
         
         // 武器状态
-        public Item? PrimaryWeapon;
-        public Item? SecondaryWeapon;
-        public Item? MeleeWeapon;
-        public Item? ThrowableWeapon;
-        public int AmmoCount;
-        public float HealthPercentage;
+
         public bool IsInCombat => Pressure > 0 || HasLoS;
         
         // 目标状态
@@ -76,6 +71,14 @@ namespace BloodMoon
         }
 
         /// <summary>
+        /// 传感器/决策的固定节拍（秒），必须与 BloodMoonAIController.AI_TICK_INTERVAL 一致。
+        /// 修复 P0-6：UpdateSensors() 只在 10Hz 的 tick 块里被调用（BloodMoonAIController.cs:251-254），
+        /// 但内部却用 Time.deltaTime（≈0.016s）累积 → 粘性增长、切换冷却、压力衰减全部慢约 6 倍
+        /// （例如 3s 切换冷却实际要 ~18s，压力衰减 0.5/s 实际只有 ~0.085/s）。
+        /// </summary>
+        public const float SensorInterval = 0.1f;
+
+        /// <summary>
         /// 更新AI的感官数据，包括目标选择、距离、视线等
         /// </summary>
         public void UpdateSensors()
@@ -85,12 +88,12 @@ namespace BloodMoon
             // 更新目标持久性计时器
             if (_targetSwitchCooldown > 0f)
             {
-                _targetSwitchCooldown -= Time.deltaTime;
+                _targetSwitchCooldown -= SensorInterval;
             }
 
             if (Target != null)
             {
-                _timeWithCurrentTarget += Time.deltaTime;
+                _timeWithCurrentTarget += SensorInterval;
             }
             else
             {
@@ -135,8 +138,10 @@ namespace BloodMoon
                     if (c == null || c == Character) continue;
                     if (c.Health.CurrentHealth <= 0) continue;
                     
-                    // 敌对逻辑：攻击不同队伍
-                    if (c.Team != myTeam) 
+                    // 敌对逻辑：使用游戏自带的 Team.IsEnemy（Team.cs:3-18）。
+                    // 修复 P1-14：原先直接比较 c.Team != myTeam，会绕过游戏规则
+                    // （middle 阵营永远中立；Teams.all 对所有人为敌），导致误伤中立单位。
+                    if (Team.IsEnemy(myTeam, c.Team))
                     {
                         // 额外检查：确保目标不是BloodMoon AI（同一模组）
                         // 这防止了我们模组敌人之间的友军火力
@@ -196,8 +201,8 @@ namespace BloodMoon
             // 回退：如果未找到目标，但玩家活着，则目标为玩家
             if (bestTarget == null && CharacterMainControl.Main != null && CharacterMainControl.Main.Health.CurrentHealth > 0)
             {
-                 // 仅当玩家不是盟友时
-                 if (CharacterMainControl.Main.Team != Character.Team)
+                 // 仅当玩家是敌人时（同样走游戏规则）
+                 if (Team.IsEnemy(Character.Team, CharacterMainControl.Main.Team))
                     bestTarget = CharacterMainControl.Main;
             }
 
@@ -213,6 +218,14 @@ namespace BloodMoon
             }
 
             Target = bestTarget;
+
+            // 修复 P1-12：压力衰减与血量快照必须在"无目标提前返回"之前更新。
+            // 原先放在 Target == null 的 return 之后 → 脱战后压力永远不下降，
+            // 会持续触发 Panic/TakeCover 等应激动作。
+            Pressure = Mathf.Max(0f, Pressure - SensorInterval * 0.5f);
+            // P2：原先先写 HealthPercentage 字段再读它算 IsHurt，现在直接内联（该字段已删除）
+            IsHurt = Character.Health.CurrentHealth / Character.Health.MaxHealth < 0.4f;
+
             if (Target == null) return;
             
             var diff = Target.transform.position - Character.transform.position;
@@ -234,42 +247,27 @@ namespace BloodMoon
             {
                 LastSeenTime = Time.time;
                 LastKnownPos = Target.transform.position;
-            }
-            
-            // 更新压力
-            Pressure = Mathf.Max(0f, Pressure - Time.deltaTime * 0.5f);
-            
-            // 检查生命值
-            HealthPercentage = Character.Health.CurrentHealth / Character.Health.MaxHealth;
-            IsHurt = HealthPercentage < 0.4f;
-            
-            // 检查弹药和武器
-            var gun = Character.GetGun();
-            AmmoCount = gun != null ? gun.BulletCount : 0;
-            IsLowAmmo = gun != null && gun.BulletCount < (gun.Capacity * 0.2f);
-            IsReloading = gun != null && gun.IsReloading();
-            
-            PrimaryWeapon = Character.PrimWeaponSlot()?.Content;
-            SecondaryWeapon = Character.SecWeaponSlot()?.Content;
-            MeleeWeapon = Character.MeleeWeaponSlot()?.Content;
-            
-            // 检查可投掷/技能物品
-            ThrowableWeapon = null;
-            var inv = Character.CharacterItem?.Inventory;
-            if (inv != null)
-            {
-                foreach(var item in inv) 
+
+                // 修复 P0-1：把"最后见到玩家的位置/时间"写进全局记忆。
+                // 这两个字段本来就被 Action_Search（本文件 :834-838）与
+                // BloodMoonAIController.PerformSearch 读取，但全仓没有任何写入点 →
+                // "搜索最后已知位置"的分支永远不生效，跨 AI/跨场景的协同搜索也失效。
+                if (Store != null && Target == CharacterMainControl.Main)
                 {
-                    if(item == null) continue;
-                    var ss = item.GetComponent<ItemSetting_Skill>();
-                    if(ss != null && ss.Skill != null && !item.GetComponent<Drug>()) 
-                    {
-                        ThrowableWeapon = item;
-                        break;
-                    }
+                    Store.LastKnownPlayerPos = LastKnownPos;
+                    Store.LastSeenTime = Time.time;
                 }
             }
-            
+
+            // 检查弹药和武器
+            var gun = Character.GetGun();
+            IsLowAmmo = gun != null && gun.BulletCount < (gun.Capacity * 0.2f);
+            IsReloading = gun != null && gun.IsReloading();
+
+            // P2 清理：删除了 PrimaryWeapon/SecondaryWeapon/MeleeWeapon/ThrowableWeapon/AmmoCount/
+            // HealthPercentage 六个**只写不读**的字段（它们唯一的读者 ContextAwareDecisionMaker
+            // 从未被实例化）。顺带省掉每 0.1 秒/每 AI 的 3 次武器槽查询与一次全背包枚举。
+
             // 检查目标状态
             var tGun = Target.GetGun();
             TargetIsReloading = tGun != null && tGun.IsReloading();
@@ -522,6 +520,10 @@ namespace BloodMoon
         {
             if (ctx.IsReloading) return 0.9f; // 若已开始则继续装填
             if (ctx.Character == null) return 0f;
+            // 修复 P0-10：上一次 PerformReload 失败（背包里没有该口径子弹，BeginReload() 返回 false）
+            // 时不再给出 0.92 的高分，否则 AI 会一直举着空枪做无效装填
+            // （Reload 没有冷却，且能压过 0.92 的动作极少：Engage 在 7.5m 只有 0.85）。
+            if (ctx.Controller != null && ctx.Controller.IsReloadBlocked) return 0f;
             var gun = ctx.Character.GetGun();
             if (gun == null) return 0f;
             
@@ -595,7 +597,10 @@ namespace BloodMoon
 
             // 若濒死且承受压力
             if (hp < 0.3f && ctx.Pressure > 2.0f) return 0.95f;
-            
+
+            // 修复 P1-10：队长下令撤退时提高权重（原先该订单无人消费）
+            if (ctx.SquadOrder == "Retreat" && hp < 0.6f) return 0.8f;
+
             return 0f;
         }
         public override void Execute(AIContext ctx)
@@ -619,7 +624,10 @@ namespace BloodMoon
             
             // 一般性谨慎
             if (ctx.HasLoS && ctx.DistToTarget < 10f) return 0.6f;
-            
+
+            // 修复 P1-10：执行小队订单 "TakeCover"
+            if (ctx.SquadOrder == "TakeCover") return 0.75f;
+
             return 0f;
         }
         public override void Execute(AIContext ctx)
@@ -678,6 +686,9 @@ namespace BloodMoon
                 }
             }
             
+            // 修复 P1-10：执行小队订单 "Suppress"（压制）
+            if (ctx.SquadOrder == "Suppress" && ctx.HasLoS) return 0.8f;
+
             return 0f;
         }
         public override void Execute(AIContext ctx)
@@ -733,6 +744,9 @@ namespace BloodMoon
                     float retreatFactor = Mathf.Clamp01((0.4f - hp) / 0.4f) * Mathf.Clamp01((ctx.DistToTarget - 15f) / 15f);
                     score -= retreatFactor * 0.15f;
                 }
+
+                // 修复 P1-10：消费小队订单（原先 5 种订单里只有 "Flank" 被读取，其余 4 种纯空转）
+                if (ctx.SquadOrder == "Engage") score += 0.25f;
 
                 return Mathf.Clamp01(score);
             }
